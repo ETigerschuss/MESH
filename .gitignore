@@ -1,0 +1,56 @@
+# Large data directories
+comprehensive_overlap_results/
+neuron_meshes/
+em_snaps/
+*.obj
+*.png
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backup and old versions
+*_backup.py
+*_v2.py
+*_v3.py
+*_v4.py
+2025_09_25_*.py
+new_html_template.py
+em_overlay_*.py
+export_meshes_*.py
+simple_mesh_*.py
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+~$*
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Large output files
+*.html
+*.htm
+comprehensive_overlap_results/*.csv
+comprehensive_overlap_results/*.png
