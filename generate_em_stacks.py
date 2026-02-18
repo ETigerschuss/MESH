@@ -40,42 +40,43 @@ NEURON_IDS = {
 }
 
 # Color scheme based on cell types with nuances
-# VS (Visual System) = #1B9E77 (teal/green)
-# HS (Horizontal System) = #D95F02 (orange)
-# MNs (Motor Neurons) = #7570B3 (purple)
+# MOS (Ocellar) = #4D9221 (green)
+# VS (Visual System) = #D14900 (deep orange)
+# MOT (Motor) = #5E3C99 (purple)
+# HS (Horizontal System) = #C51B7D (magenta/pink)
 
 NEURON_COLORS = {
-    # Motor Neurons (MNs) - Purple #7570B3 with nuances
-    'MOT_L': (117, 112, 179),      # Base purple
-    'MOT_R': (147, 142, 209),      # Lighter purple
-    'MOS_L': (87, 82, 149),        # Darker purple
-    'MOS_R': (107, 102, 169),      # Medium purple
+    # Motor Neurons - Purple #5E3C99 with nuances
+    'MOT_L': (94, 60, 153),        # Base purple
+    'MOT_R': (124, 90, 183),       # Lighter purple
+    'MOS_L': (77, 146, 33),        # MOS green base
+    'MOS_R': (97, 166, 53),        # MOS green lighter
     
-    # Visual System (VS) - Teal #1B9E77 with nuances
-    'VS1_L': (27, 158, 119),       # Base teal
-    'VS1_R': (57, 188, 149),       # Lighter teal
-    'VS2_L': (17, 138, 99),        # Darker teal
-    'VS2_R': (37, 168, 129),       # Medium-light teal
-    'VS3_L': (22, 148, 109),       # Slightly darker
-    'VS3_R': (47, 178, 139),       # Slightly lighter
-    'VS4_L': (12, 128, 89),        # More saturated dark
-    'VS4_R': (52, 198, 159),       # More saturated light
-    'VS5_L': (27, 143, 104),       # Shifted darker
-    'VS5_R': (42, 173, 134),       # Shifted lighter
-    'VS6_L': (17, 153, 114),       # Variation 1
-    'VS6_R': (37, 183, 144),       # Variation 1 light
-    'VS7_L': (22, 133, 94),        # Variation 2
-    'VS7_R': (47, 163, 124),       # Variation 2 light
-    'VS8_L': (27, 148, 109),       # Variation 3
-    'VS8_R': (52, 178, 139),       # Variation 3 light
+    # Visual System (VS) - Deep orange #D14900 with nuances
+    'VS1_L': (209, 73, 0),         # Base orange
+    'VS1_R': (229, 103, 30),       # Lighter
+    'VS2_L': (189, 53, 0),         # Darker
+    'VS2_R': (219, 83, 10),        # Medium
+    'VS3_L': (199, 63, 0),         # Slightly darker
+    'VS3_R': (224, 93, 20),        # Slightly lighter
+    'VS4_L': (179, 43, 0),         # More saturated dark
+    'VS4_R': (234, 113, 40),       # More saturated light
+    'VS5_L': (204, 68, 0),         # Shifted darker
+    'VS5_R': (229, 98, 25),        # Shifted lighter
+    'VS6_L': (194, 58, 0),         # Variation 1
+    'VS6_R': (224, 88, 15),        # Variation 1 light
+    'VS7_L': (184, 48, 0),         # Variation 2
+    'VS7_R': (219, 78, 5),         # Variation 2 light
+    'VS8_L': (209, 73, 0),         # Variation 3
+    'VS8_R': (234, 103, 30),       # Variation 3 light
     
-    # Horizontal System (HS) - Orange #D95F02 with nuances
-    'HSN_L': (217, 95, 2),         # Base orange
-    'HSN_R': (237, 125, 42),       # Lighter orange
-    'HSE_L': (197, 75, 0),         # Darker orange
-    'HSE_R': (227, 105, 22),       # Medium orange
-    'HSS_L': (207, 85, 0),         # Variation 1
-    'HSS_R': (237, 115, 32),       # Variation 1 light
+    # Horizontal System (HS) - Magenta #C51B7D with nuances
+    'HSN_L': (197, 27, 125),       # Base magenta
+    'HSN_R': (217, 57, 155),       # Lighter
+    'HSE_L': (177, 7, 105),        # Darker
+    'HSE_R': (207, 37, 135),       # Medium
+    'HSS_L': (187, 17, 115),       # Variation 1
+    'HSS_R': (217, 47, 145),       # Variation 1 light
 }
 
 
@@ -180,7 +181,16 @@ def create_segmented_snapshot(em_vol, seg_vol, center_nm, source_id, target_id,
 
 
 def main():
-    results_dir = 'comprehensive_overlap_results'
+    # Auto-detect latest results directory
+    base = os.path.dirname(os.path.abspath(__file__))
+    candidates = [d for d in os.listdir(base)
+                  if os.path.isdir(os.path.join(base, d))
+                  and d.startswith('comprehensive_overlap_results_')]
+    if candidates:
+        results_dir = sorted(candidates)[-1]
+    else:
+        results_dir = 'comprehensive_overlap_results'
+    results_dir = os.environ.get('MESH_RESULTS_DIR', results_dir)
     em_snap_dir = os.path.join(results_dir, 'em_snaps')
     os.makedirs(em_snap_dir, exist_ok=True)
     

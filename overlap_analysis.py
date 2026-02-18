@@ -8,43 +8,38 @@ from fafbseg.flywire.synapses import get_synapses
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
-from matplotlib import colors as mpl_colors, colormaps as mpl_cmaps
+from matplotlib import colors as mpl_colors
 from colorsys import rgb_to_hls, hls_to_rgb
 import matplotlib.pyplot as plt
-import seaborn as sns
 import trimesh
 from tqdm import tqdm
 from scipy.spatial import cKDTree
 import time
 import os
+import shutil
 import pickle
 import hashlib
-from plotly.offline import plot
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import traceback
 
-# Set Flywire Token
-# Option 1: Set as environment variable: export FLYWIRE_TOKEN="your_token_here"
-# Option 2: Enter when prompted below
+# Set Flywire Token (non-interactive-safe)
+# Preferred: set env var FLYWIRE_TOKEN before running.
 token = os.environ.get('FLYWIRE_TOKEN')
 if not token:
-    print("FlyWire CAVE token not found in environment.")
-    print("You can set it with: export FLYWIRE_TOKEN='your_token_here'")
-    token = input("Enter your FlyWire CAVE token: ").strip()
-    if not token:
-        raise ValueError("FlyWire token is required to run this analysis")
+    # Avoid blocking prompts in non-interactive runs; fail fast with guidance
+    raise ValueError("FlyWire token missing. Set env FLYWIRE_TOKEN before running.")
 
 fafbseg.flywire.set_chunkedgraph_secret(token, overwrite=True)
 
-# Define Neuron IDs
+# Define Neuron IDs (restricted scope + BIPS)
 neuron_ids = {
-    720575940618519710: 'MOT_L', 
+    # MOT
+    720575940618519710: 'MOT_L',
     720575940630139386: 'MOT_R',
-    720575940622361270: 'MOS_L', 
+    # MOS
+    720575940622361270: 'MOS_L',
     720575940622168052: 'MOS_R',
+    # VS1-4 only
     720575940626477498: 'VS1_L',
     720575940619878961: 'VS1_R',
     720575940640722851: 'VS2_L',
@@ -53,31 +48,116 @@ neuron_ids = {
     720575940641812699: 'VS3_R',
     720575940624273919: 'VS4_L',
     720575940659799937: 'VS4_R',
-    720575940626457406: 'VS5_L',
-    720575940639151694: 'VS5_R',
-    720575940647311651: 'VS6_L',
-    720575940626928521: 'VS6_R',
-    720575940624931564: 'VS7_L',
-    720575940618681709: 'VS7_R',
-    720575940633923298: 'VS8_L',
-    720575940636972400: 'VS8_R',
+    # HS (HSN, HSE, HSS)
     720575940628031249: 'HSN_L',
     720575940615933919: 'HSN_R',
     720575940629153020: 'HSE_L',
     720575940629148007: 'HSE_R',
     720575940622312965: 'HSS_L',
     720575940628743496: 'HSS_R',
-    #720575940631999685: 'H2_L',
-    #720575940632427603: 'H2_R',
-    #720575940623618708: 'MEME_R',
-    #720575940622581173: 'MEME_L'
+    # BIPS
+    720575940623618708: 'BIPS_L',
+    720575940622581173: 'BIPS_R',
 }
 
 # Configuration
 THRESHOLDS_MICRONS = [0.1]
 LOD = 50
 CACHE_DIR = "overlap_cache"
-RESULTS_DIR = "comprehensive_overlap_results"
+
+def _default_results_dir():
+    """Always create a new results folder with today's date."""
+    from datetime import date
+    return f"comprehensive_overlap_results_{date.today().isoformat()}"
+
+def _find_previous_results():
+    """Find all previous results directories (sorted newest first).
+    Returns list of absolute paths to previous result dirs."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    today_dir = _default_results_dir()
+    candidates = [os.path.join(base, d) for d in os.listdir(base)
+                  if os.path.isdir(os.path.join(base, d))
+                  and d.startswith('comprehensive_overlap_results_')
+                  and d != today_dir]
+    return sorted(candidates, reverse=True)  # newest first
+
+def _find_previous_meshes():
+    """Scan previous results for already-downloaded neuron mesh OBJ files.
+    Returns dict: {neuron_id: path_to_obj}"""
+    found = {}
+    for prev_dir in _find_previous_results():
+        mesh_dir = os.path.join(prev_dir, 'neuron_meshes')
+        if not os.path.isdir(mesh_dir):
+            continue
+        for fname in os.listdir(mesh_dir):
+            if fname.endswith('.obj'):
+                nid = int(fname.replace('.obj', ''))
+                if nid not in found:
+                    found[nid] = os.path.join(mesh_dir, fname)
+    return found
+
+def _find_previous_pair_results(threshold_um):
+    """Scan previous results for already-computed pair overlap data.
+    Returns dict: {pair_key: (area, geo_data)} from saved CSVs/patch files."""
+    found = {}
+    for prev_dir in _find_previous_results():
+        csv_file = os.path.join(prev_dir, f'results_{threshold_um}um.csv')
+        if not os.path.exists(csv_file):
+            continue
+        try:
+            df = pd.read_csv(csv_file)
+            for _, row in df.iterrows():
+                # CSV columns: Source_Neuron, Target_Neuron, Contact_Area_um2
+                src = row.get('Source_Neuron', row.get('Source', ''))
+                tgt = row.get('Target_Neuron', row.get('Target', ''))
+                pair_key = f"{src}→{tgt}"
+                if pair_key not in found:
+                    area = float(row.get('Contact_Area_um2', 0))
+                    found[pair_key] = area
+        except Exception:
+            pass
+        if found:
+            break  # use most recent previous run
+    return found
+
+def _find_previous_patch_data(threshold_um):
+    """Scan previous results for saved individual patch CSVs.
+    Returns dict: {pair_key: path_to_csv}"""
+    found = {}
+    for prev_dir in _find_previous_results():
+        patch_dir = os.path.join(prev_dir, f'individual_patches_threshold_{threshold_um}um')
+        if not os.path.isdir(patch_dir):
+            continue
+        for fname in os.listdir(patch_dir):
+            if fname.endswith('_patch_data.csv'):
+                # e.g. MOT_L_to_HSN_L_patch_data.csv
+                stem = fname.replace('_patch_data.csv', '')
+                parts = stem.split('_to_')
+                if len(parts) == 2:
+                    pair_key = f"{parts[0]}→{parts[1]}"
+                    if pair_key not in found:
+                        found[pair_key] = os.path.join(patch_dir, fname)
+        if found:
+            break
+    return found
+
+def _find_previous_synapses():
+    """Scan previous results for saved synapses.csv."""
+    for prev_dir in _find_previous_results():
+        syn_file = os.path.join(prev_dir, 'synapses.csv')
+        if os.path.exists(syn_file):
+            return syn_file
+    return None
+
+def _find_previous_em_snaps():
+    """Scan previous results for em_snaps directory."""
+    for prev_dir in _find_previous_results():
+        snap_dir = os.path.join(prev_dir, 'em_snaps')
+        if os.path.isdir(snap_dir) and os.listdir(snap_dir):
+            return snap_dir
+    return None
+
+RESULTS_DIR = os.environ.get('MESH_RESULTS_DIR', _default_results_dir())
 
 def get_cache_key(neuron_ids, thresholds, lod):
     """Generate cache key for analysis parameters"""
@@ -432,12 +512,6 @@ def save_detailed_geometric_data(all_results, output_dir):
     print(f"\nAll geometric data saved in: {geo_dir}/")
     return geo_dir
 
-def save_individual_pair_geometric_data(all_results, output_dir):
-    """Save geometric data only for neuron pairs that have actual contact"""
-    print("\n============================================================")
-    print("STEP 6b: Saving individual pair geometric data (contacts only)")
-    print("============================================================")
-
 def _log_viz_debug(msg: str):
     try:
         os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -506,6 +580,8 @@ def _get_group(name: str) -> str:
         return "VS"
     if name.startswith("HS"):
         return "HS"
+    if name.startswith("BIPS"):
+        return "BIPS"
     return "OTHER"
 
 def _hemi_of(name: str) -> str | None:
@@ -516,33 +592,33 @@ def _hemi_of(name: str) -> str | None:
     return None
 
 def _build_color_map(valid_names):
-    """Assign shades per identity within group using requested base colors:
-    - Base MN: #7570B3, produce distinct shades for MOT and MOS (L/R same)
-    - Base HS: #1B9E77, distinct for HSN/HSE/HSS (L/R same)
-    - Base VS: #D95F02, distinct for VS1..VS8 (L/R same)
+    """Assign group-based colors (L/R share the same hue):
+    MOS: #4D9221, VS: #D14900, MOT: #5E3C99, HS: #C51B7D, BIPS: black.
+    HS shades split across HSN/HSE/HSS; VS shades across VS1-4; others share their base.
     """
-    MN_BASE = '#7570B3'
-    HS_BASE = '#1B9E77'
-    VS_BASE = '#D95F02'
+
+    BASES = {
+        'MOT': '#5E3C99',
+        'MOS': '#4D9221',
+        'HS':  '#C51B7D',
+        'VS':  '#D14900',
+        'BIPS': '#000000',
+    }
 
     def base_id(name: str) -> str:
         return name.split('_')[0]
 
-    ids_by_group: dict[str, list[str]] = {'MOT_MOS': [], 'HS': [], 'VS': []}
-    for n in sorted(set(base_id(x) for x in valid_names)):
-        if n in ('MOT', 'MOS'):
-            ids_by_group['MOT_MOS'].append(n)
-        elif n.startswith('HS'):
-            ids_by_group['HS'].append(n)
-        elif n.startswith('VS'):
-            ids_by_group['VS'].append(n)
+    ids_by_group: dict[str, set[str]] = {'MOT': set(), 'MOS': set(), 'HS': set(), 'VS': set(), 'BIPS': set()}
+    for n in (base_id(x) for x in valid_names):
+        grp = _get_group(n)
+        if grp in ids_by_group:
+            ids_by_group[grp].add(n)
 
     def make_shades(base_hex: str, labels: list[str]) -> dict[str, str]:
         if not labels:
             return {}
         r, g, b = mpl_colors.to_rgb(base_hex)
         h, l, s = rgb_to_hls(r, g, b)
-        # spread lightness around the base l
         n = max(1, len(labels))
         l_min = max(0.22, l * 0.65)
         l_max = min(0.92, l * 1.15)
@@ -554,22 +630,28 @@ def _build_color_map(valid_names):
             shades[lab] = mpl_colors.to_hex((ri, gi, bi))
         return shades
 
-    mn_shades = make_shades(MN_BASE, ids_by_group['MOT_MOS'])
-    hs_shades = make_shades(HS_BASE, ids_by_group['HS'])
-    vs_shades = make_shades(VS_BASE, ids_by_group['VS'])
+    mot_shades = make_shades(BASES['MOT'], sorted(ids_by_group['MOT']))
+    mos_shades = make_shades(BASES['MOS'], sorted(ids_by_group['MOS']))
+    hs_shades = make_shades(BASES['HS'], sorted(ids_by_group['HS']))
+    vs_shades = make_shades(BASES['VS'], sorted(ids_by_group['VS']))
+    bips_shades = {lab: BASES['BIPS'] for lab in ids_by_group['BIPS']}
 
-    cmap: dict[str, str] = {}
-    for n in valid_names:
-        bid = base_id(n)
-        if bid in mn_shades:
-            cmap[n] = mn_shades[bid]
-        elif bid in hs_shades:
-            cmap[n] = hs_shades[bid]
-        elif bid in vs_shades:
-            cmap[n] = vs_shades[bid]
+    color_map = {}
+    for name in valid_names:
+        base = base_id(name)
+        if base in mot_shades:
+            color_map[name] = mot_shades[base]
+        elif base in mos_shades:
+            color_map[name] = mos_shades[base]
+        elif base in hs_shades:
+            color_map[name] = hs_shades[base]
+        elif base in vs_shades:
+            color_map[name] = vs_shades[base]
+        elif base in bips_shades:
+            color_map[name] = bips_shades[base]
         else:
-            cmap[n] = '#888888'
-    return cmap
+            color_map[name] = '#888888'
+    return color_map
 
 def _decimate_mesh_for_plot(verts: np.ndarray, faces: np.ndarray, max_faces: int | None = None, seed: int = 42):
     """Return decimated x,y,z and i,j,k lists for Plotly Mesh3d.
@@ -1516,227 +1598,6 @@ def compute_contact_participants(all_results, threshold_um: float,
             names.add(src)
             names.add(tgt)
     return names
-    
-    # Create subdirectory for individual pair data
-    pairs_dir = os.path.join(output_dir, 'individual_pairs')
-    os.makedirs(pairs_dir, exist_ok=True)
-    
-    # Track all unique pairs that have contact across any threshold
-    pairs_with_contact = set()
-    for threshold, results in all_results.items():
-        for pair_key, result_data in results.items():
-            # Check if this pair has contact
-            if isinstance(result_data, tuple):
-                area, geo_data = result_data
-            else:
-                area = result_data
-            
-            if area > 0:
-                pairs_with_contact.add(pair_key)
-    
-    print(f"Found {len(pairs_with_contact)} pairs with contact across all thresholds")
-    
-    if len(pairs_with_contact) == 0:
-        print("No pairs with contact found - no individual files to save")
-        return pairs_dir
-    
-    # Process each pair that has contact
-    saved_pairs = 0
-    error_pairs = 0
-    
-    for pair_key in sorted(pairs_with_contact):
-        try:
-            neuron_a, neuron_b = pair_key.split('→')
-            safe_filename = f"{neuron_a}_to_{neuron_b}.csv"
-            pair_file = os.path.join(pairs_dir, safe_filename)
-            
-            # Collect data for this pair across all thresholds
-            pair_data = []
-            has_any_contact = False
-            
-            for threshold in sorted(all_results.keys()):
-                if pair_key in all_results[threshold]:
-                    result_data = all_results[threshold][pair_key]
-                    
-                    # Handle tuple format (area, geo_data)
-                    if isinstance(result_data, tuple):
-                        area, geo_data = result_data
-                    else:
-                        area = result_data
-                        geo_data = create_empty_geometric_data()
-                    
-                    if area > 0:
-                        has_any_contact = True
-                        
-                        # Create base record for this threshold
-                        base_record = {
-                            'source_neuron': neuron_a,
-                            'target_neuron': neuron_b,
-                            'threshold_um': threshold,
-                            'contact_area_um2': area,
-                            'has_contact': True
-                        }
-                        
-                        if geo_data and area > 0:
-                            # Calculate contact patch centroid (average of all face centroids)
-                            face_data = geo_data.get('face_data', [])
-                            contact_centroid = np.array([0.0, 0.0, 0.0])
-                            total_patch_area = 0
-                            
-                            if face_data:
-                                # Weighted average by area
-                                for face_info in face_data:
-                                    patch_area = face_info['area'] / 1e6  # Convert to μm²
-                                    contact_centroid += face_info['centroid'] * patch_area
-                                    total_patch_area += patch_area
-                                if total_patch_area > 0:
-                                    contact_centroid /= total_patch_area
-                            
-                            # Determine if this is a larger patch (above 90th percentile of observed contact areas)
-                            # Using a threshold of 10 μm² as a reasonable cutoff for "larger patches"
-                            is_larger_patch = area > 10.0
-                            
-                            # Add geometric information
-                            base_record.update({
-                                'total_area_source_um2': geo_data.get('total_area_meshA', 0),
-                                'total_area_target_um2': geo_data.get('total_area_meshB', 0),
-                                'centroid_source_x': geo_data.get('centroid_meshA', [0, 0, 0])[0],
-                                'centroid_source_y': geo_data.get('centroid_meshA', [0, 0, 0])[1],
-                                'centroid_source_z': geo_data.get('centroid_meshA', [0, 0, 0])[2],
-                                'centroid_target_x': geo_data.get('centroid_meshB', [0, 0, 0])[0],
-                                'centroid_target_y': geo_data.get('centroid_meshB', [0, 0, 0])[1],
-                                'centroid_target_z': geo_data.get('centroid_meshB', [0, 0, 0])[2],
-                                'contact_patch_centroid_x': contact_centroid[0],
-                                'contact_patch_centroid_y': contact_centroid[1],
-                                'contact_patch_centroid_z': contact_centroid[2],
-                                'contact_patch_centroid_x_norm': contact_centroid[0] / 4.0,
-                                'contact_patch_centroid_y_norm': contact_centroid[1] / 4.0,
-                                'contact_patch_centroid_z_norm': contact_centroid[2] / 40.0,
-                                'is_larger_patch': is_larger_patch,
-                                'num_vertices_source': geo_data.get('num_vertices_meshA', 0),
-                                'num_vertices_target': geo_data.get('num_vertices_meshB', 0),
-                                'num_faces_source': geo_data.get('num_faces_meshA', 0),
-                                'num_faces_target': geo_data.get('num_faces_meshB', 0),
-                                'num_contact_vertices': len(geo_data.get('close_vertices_meshA', [])),
-                                'num_contact_faces': len(geo_data.get('face_data', [])),
-                                'is_sampled': geo_data.get('sampled', False),
-                                'sample_ratio_source': geo_data.get('sample_ratio_A', 1.0),
-                                'sample_ratio_target': geo_data.get('sample_ratio_B', 1.0)
-                            })
-                            
-                            # Add contact patch details
-                            face_data = geo_data.get('face_data', [])
-                            if face_data:
-                                # Add individual patch information
-                                for i, face_info in enumerate(face_data):
-                                    patch_record = base_record.copy()
-                                    patch_record.update({
-                                        'patch_id': i,
-                                        'patch_area_um2': face_info['area'] / 1e6,
-                                        'patch_centroid_x': face_info['centroid'][0],
-                                        'patch_centroid_y': face_info['centroid'][1],
-                                        'patch_centroid_z': face_info['centroid'][2],
-                                        'face_idx_original': face_info['face_idx'],
-                                        'vertex1_x': face_info['vertices'][0][0],
-                                        'vertex1_y': face_info['vertices'][0][1],
-                                        'vertex1_z': face_info['vertices'][0][2],
-                                        'vertex2_x': face_info['vertices'][1][0],
-                                        'vertex2_y': face_info['vertices'][1][1],
-                                        'vertex2_z': face_info['vertices'][1][2],
-                                        'vertex3_x': face_info['vertices'][2][0],
-                                        'vertex3_y': face_info['vertices'][2][1],
-                                        'vertex3_z': face_info['vertices'][2][2]
-                                    })
-                                    pair_data.append(patch_record)
-                            else:
-                                # No patch data, just add the summary record
-                                for key in ['patch_id', 'patch_area_um2', 'patch_centroid_x', 'patch_centroid_y', 'patch_centroid_z',
-                                           'face_idx_original', 'vertex1_x', 'vertex1_y', 'vertex1_z',
-                                           'vertex2_x', 'vertex2_y', 'vertex2_z', 'vertex3_x', 'vertex3_y', 'vertex3_z']:
-                                    base_record[key] = np.nan
-                                pair_data.append(base_record)
-                        else:
-                            # Contact but no geometric data, add record with missing geometric info
-                            for key in ['total_area_source_um2', 'total_area_target_um2',
-                                       'centroid_source_x', 'centroid_source_y', 'centroid_source_z',
-                                       'centroid_target_x', 'centroid_target_y', 'centroid_target_z',
-                                       'contact_patch_centroid_x', 'contact_patch_centroid_y', 'contact_patch_centroid_z',
-                                       'contact_patch_centroid_x_norm', 'contact_patch_centroid_y_norm', 'contact_patch_centroid_z_norm',
-                                       'num_vertices_source', 'num_vertices_target', 'num_faces_source', 'num_faces_target',
-                                       'num_contact_vertices', 'num_contact_faces', 'patch_id', 'patch_area_um2',
-                                       'patch_centroid_x', 'patch_centroid_y', 'patch_centroid_z', 'face_idx_original',
-                                       'vertex1_x', 'vertex1_y', 'vertex1_z', 'vertex2_x', 'vertex2_y', 'vertex2_z',
-                                       'vertex3_x', 'vertex3_y', 'vertex3_z', 'is_sampled', 'sample_ratio_source', 'sample_ratio_target']:
-                                if key == 'is_larger_patch':
-                                    base_record[key] = area > 10.0
-                                else:
-                                    base_record[key] = np.nan if 'ratio' in key or 'centroid' in key or 'vertex' in key else 0
-                            pair_data.append(base_record)
-            
-            # Only save if this pair actually has contact data
-            if has_any_contact and pair_data:
-                pair_df = pd.DataFrame(pair_data)
-                pair_df.to_csv(pair_file, index=False)
-                saved_pairs += 1
-                
-                # Print summary for this pair
-                total_area = pair_df['contact_area_um2'].sum()
-                max_area = pair_df['contact_area_um2'].max()
-                num_thresholds = len(pair_df['threshold_um'].unique())
-                print(f"  {pair_key}: {len(pair_data)} records across {num_thresholds} thresholds, total area: {total_area:.4f} μm², max: {max_area:.4f} μm²")
-            
-        except Exception as e:
-            print(f"  Error processing pair {pair_key}: {e}")
-            error_pairs += 1
-            continue
-    
-    print(f"\nIndividual pair geometric data summary:")
-    print(f"  Successfully saved: {saved_pairs} pairs with contact")
-    print(f"  Errors: {error_pairs} pairs")
-    print(f"  Skipped pairs with no contact: {len(all_results[list(all_results.keys())[0]]) - len(pairs_with_contact)}")
-    print(f"  Files saved in: {pairs_dir}/")
-    
-    # Create an index file for contact pairs only
-    index_file = os.path.join(pairs_dir, "contact_pairs_index.csv")
-    try:
-        index_data = []
-        for pair_key in sorted(pairs_with_contact):
-            neuron_a, neuron_b = pair_key.split('→')
-            safe_filename = f"{neuron_a}_to_{neuron_b}.csv"
-            
-            # Calculate summary statistics for this pair
-            max_contact_area = 0
-            total_contact_area = 0
-            contact_thresholds = []
-            
-            for threshold in all_results.keys():
-                if pair_key in all_results[threshold]:
-                    result = all_results[threshold][pair_key]
-                    area = result[0] if isinstance(result, tuple) else result
-                    if area > 0:
-                        max_contact_area = max(max_contact_area, area)
-                        total_contact_area += area
-                        contact_thresholds.append(threshold)
-            
-            index_data.append({
-                'pair_key': pair_key,
-                'source_neuron': neuron_a,
-                'target_neuron': neuron_b,
-                'filename': safe_filename,
-                'max_contact_area_um2': max_contact_area,
-                'total_contact_area_um2': total_contact_area,
-                'num_contact_thresholds': len(contact_thresholds),
-                'contact_thresholds': ', '.join(map(str, sorted(contact_thresholds)))
-            })
-        
-        index_df = pd.DataFrame(index_data)
-        index_df.to_csv(index_file, index=False)
-        print(f"  Contact pairs index file saved: {index_file}")
-        
-    except Exception as e:
-        print(f"  Error creating index file: {e}")
-    
-    return pairs_dir
 
 def calculate_large_mesh_overlap(neuronA, neuronB, threshold=100.0):
     """Memory-efficient overlap calculation for very large meshes using sampling"""
@@ -2016,20 +1877,46 @@ def create_empty_geometric_data():
     }
 
 def load_all_neurons(neuron_ids, lod=50):
-    """Load all neurons"""
+    """Load all neurons, recycling meshes from previous results when available."""
+    import navis
     neurons = {}
+    previous_meshes = _find_previous_meshes()
+    recycled = 0
+    downloaded = 0
+
     print(f"Loading {len(neuron_ids)} neurons...")
-    
+    if previous_meshes:
+        print(f"  Found {len(previous_meshes)} recycled meshes from previous runs")
+
     for neuron_id, name in tqdm(neuron_ids.items(), desc="Loading neurons"):
+        # Try recycling from previous OBJ files first
+        if neuron_id in previous_meshes:
+            try:
+                import trimesh as _tm
+                mesh = _tm.load(previous_meshes[neuron_id])
+                neuron = navis.MeshNeuron(mesh, id=neuron_id, name=name,
+                                         units='nm')
+                neurons[name] = neuron
+                recycled += 1
+                print(f"  Recycled {name} from {os.path.basename(os.path.dirname(os.path.dirname(previous_meshes[neuron_id])))}")
+                continue
+            except Exception as e:
+                print(f"  Recycle failed for {name}, downloading fresh: {e}")
+
+        # Download from FlyWire
         try:
             neuron = flywire.get_mesh_neuron(neuron_id, dataset="public", lod=lod)
             neurons[name] = neuron
-            print(f"Loaded {name}: {len(neuron.vertices)} vertices, {len(neuron.faces)} faces")
+            downloaded += 1
+            print(f"  Downloaded {name}: {len(neuron.vertices)} vertices, {len(neuron.faces)} faces")
         except Exception as e:
-            print(f"Failed to load {name}: {e}")
+            print(f"  Failed to load {name}: {e}")
             neurons[name] = None
-    
+
+    print(f"\nNeuron loading complete: {recycled} recycled, {downloaded} downloaded, "
+          f"{sum(1 for v in neurons.values() if v is None)} failed")
     return neurons
+
 
 def save_individual_patch_data(source, target, contact_area, geo_data, threshold_um):
     """Save detailed patch data for individual pairs with contact"""
@@ -2120,25 +2007,51 @@ def analyze_all_pairs(neurons, thresholds_microns):
         return cached_data['all_results'], cached_data['valid_names']
     
     all_results = {}
-    
+
     # Create output directory for incremental saves
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    
+
     for threshold_um in thresholds_microns:
         threshold_nm = threshold_um * 1000
         print(f"\n=== Threshold {threshold_um} μm ({threshold_nm} nm) ===")
-        
+
         results = {}
         pair_count = 0
         total_pairs = len(valid_pairs)
         successful_pairs = 0
         error_pairs = 0
-        
+        recycled_pairs = 0
+
+        # Try recycling pair results from previous runs
+        prev_pair_data = _find_previous_pair_results(threshold_um)
+        prev_patch_dir = _find_previous_patch_data(threshold_um)
+
         for source, target in valid_pairs:
             pair_count += 1
             pair_key = f"{source}→{target}"
+
+            # Try recycling from previous results
+            if pair_key in prev_pair_data:
+                prev_area = prev_pair_data[pair_key]
+                results[pair_key] = (prev_area, create_empty_geometric_data())
+                recycled_pairs += 1
+                successful_pairs += 1
+
+                # Copy patch file if it existed
+                if prev_patch_dir and prev_area > 0:
+                    patch_filename = f"{source}_to_{target}_patch_data.csv"
+                    prev_patch_file = os.path.join(prev_patch_dir, patch_filename)
+                    if os.path.exists(prev_patch_file):
+                        new_patch_dir = os.path.join(RESULTS_DIR, f"individual_patches_threshold_{threshold_um}um")
+                        os.makedirs(new_patch_dir, exist_ok=True)
+                        shutil.copy2(prev_patch_file, os.path.join(new_patch_dir, patch_filename))
+
+                if pair_count % 20 == 0:
+                    print(f"  Progress: {pair_count}/{total_pairs} ({recycled_pairs} recycled)")
+                continue
+
             print(f"Pair {pair_count}/{total_pairs}: {pair_key}")
-            
+
             try:
                 area, geo_data = calculate_neuron_overlap_simple(
                     valid_neurons[source], 
@@ -2169,7 +2082,8 @@ def analyze_all_pairs(neurons, thresholds_microns):
         
         # Save incremental results after each threshold
         print(f"\nThreshold {threshold_um}μm completed:")
-        print(f"  Successful pairs: {successful_pairs}/{total_pairs}")
+        print(f"  Recycled pairs: {recycled_pairs}/{total_pairs}")
+        print(f"  Computed pairs: {successful_pairs - recycled_pairs}/{total_pairs}")
         print(f"  Error pairs: {error_pairs}/{total_pairs}")
         
         try:
@@ -2549,90 +2463,11 @@ def save_final_combined_results(all_results, valid_names, thresholds_microns):
     except Exception as e:
         print(f"Error saving final results: {e}")
         return False
-    """Save all results to files with multiple formats"""
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    
-    # Save detailed results
-    all_results_combined = []
-    for threshold_um in thresholds_microns:
-        results_list = []
-        for pair_key, result in all_results[threshold_um].items():
-            source, target = pair_key.split('→')
-            # Extract area from tuple (area, geo_data)
-            area = result[0] if isinstance(result, tuple) else result
-            result_row = {
-                'Source_Neuron': source,
-                'Target_Neuron': target,
-                'Contact_Area_um2': area,
-                'Threshold_um': threshold_um,
-                'Has_Contact': area > 0
-            }
-            results_list.append(result_row)
-            all_results_combined.append(result_row)
-        
-        df = pd.DataFrame(results_list)
-        df.to_csv(f"{RESULTS_DIR}/results_{threshold_um}um.csv", index=False)
-        print(f"Saved: {RESULTS_DIR}/results_{threshold_um}um.csv")
-    
-    # Save combined results
-    combined_df = pd.DataFrame(all_results_combined)
-    combined_df.to_csv(f"{RESULTS_DIR}/all_results_combined.csv", index=False)
-    print(f"Saved combined results: {RESULTS_DIR}/all_results_combined.csv")
-    
-    # Save matrices
-    for key, matrix in matrices.items():
-        if key == 'mean_overall':
-            filename = f"{RESULTS_DIR}/matrix_mean_overall"
-        else:
-            filename = f"{RESULTS_DIR}/matrix_{key}um"
-        
-        matrix_df = pd.DataFrame(matrix, index=valid_names, columns=valid_names)
-        matrix_df.to_csv(f"{filename}.csv")
-        print(f"Saved: {filename}.csv")
-    
-    # Save summary statistics
-    summary_stats = []
-    for threshold_um in thresholds_microns:
-        results = all_results[threshold_um]
-        # Extract areas from tuples (area, geo_data)
-        areas = []
-        for result in results.values():
-            area = result[0] if isinstance(result, tuple) else result
-            if area > 0:
-                areas.append(area)
-        
-        total_pairs = len(results)
-        connected_pairs = len(areas)
-        
-        summary_stats.append({
-            'Threshold_um': threshold_um,
-            'Total_Pairs': total_pairs,
-            'Connected_Pairs': connected_pairs,
-            'Connection_Percentage': (connected_pairs/total_pairs)*100,
-            'Mean_Contact_Area': np.mean(areas) if areas else 0,
-            'Std_Contact_Area': np.std(areas) if areas else 0,
-            'Min_Contact_Area': np.min(areas) if areas else 0,
-            'Max_Contact_Area': np.max(areas) if areas else 0,
-            'Total_Contact_Area': np.sum(areas) if areas else 0
-        })
-    
-    summary_df = pd.DataFrame(summary_stats)
-    summary_df.to_csv(f"{RESULTS_DIR}/summary_statistics.csv", index=False)
-    print(f"Saved: {RESULTS_DIR}/summary_statistics.csv")
-    
-    print(f"\nAll results saved in: {RESULTS_DIR}/")
-    print("Files created:")
-    print("  - Individual threshold CSVs")
-    print("  - Combined results CSV")
-    print("  - Matrix files (CSV)")
-    print("  - Summary statistics")
-    print("  - Interactive HTML visualization")
-    print("  - Static plots (PNG + SVG)")
 
 def print_summary(all_results, valid_names, thresholds_microns):
     """Print analysis summary"""
     print("\n" + "="*80)
-    print("COMPREHHENSIVE NEURON OVERLAP ANALYSIS SUMMARY")
+    print("COMPREHENSIVE NEURON OVERLAP ANALYSIS SUMMARY")
     print("="*80)
     print(f"Analyzed neurons: {', '.join(valid_names)}")
     print(f"Total neurons: {len(valid_names)}")
@@ -2747,61 +2582,115 @@ def create_interactive_comparison_matrix(all_results, valid_names, thresholds_mi
         print(f"Significant contacts matrix saved to: {sig_output_file}")
 
 def export_meshes_and_generate_viewer(neurons, results_dir):
-    """Export neuron meshes as OBJ files and generate EM overlay viewer"""
+    """Export neuron meshes as OBJ files and generate EM overlay viewer.
+    Recycles meshes from previous results when possible."""
     import subprocess
     import sys
-    
+
     # Create mesh directory
     mesh_dir = os.path.join(results_dir, "neuron_meshes")
     os.makedirs(mesh_dir, exist_ok=True)
-    
+
     print(f"Exporting meshes to: {mesh_dir}")
     exported_count = 0
-    
+    recycled_count = 0
+
+    # Find meshes from previous runs
+    previous_meshes = _find_previous_meshes()
+
     # Export each neuron mesh
     for neuron_id, neuron_name in neuron_ids.items():
+        obj_path = os.path.join(mesh_dir, f"{neuron_id}.obj")
+
+        # Skip if already in current results dir
+        if os.path.exists(obj_path):
+            exported_count += 1
+            continue
+
+        # Try copying from previous results
+        if neuron_id in previous_meshes:
+            try:
+                shutil.copy2(previous_meshes[neuron_id], obj_path)
+                recycled_count += 1
+                exported_count += 1
+                print(f"  Recycled {neuron_name} mesh from previous run")
+                continue
+            except Exception:
+                pass
+
+        # Export fresh from loaded neuron
         if neuron_name not in neurons or neurons[neuron_name] is None:
             print(f"  Skipping {neuron_name} (not loaded)")
             continue
-        
+
         neuron = neurons[neuron_name]
         try:
-            # Get the trimesh object
             if hasattr(neuron, 'trimesh'):
                 mesh = neuron.trimesh
             else:
                 print(f"  Skipping {neuron_name} (no trimesh)")
                 continue
-            
-            # Export to OBJ
-            obj_path = os.path.join(mesh_dir, f"{neuron_id}.obj")
+
             mesh.export(obj_path)
             exported_count += 1
             print(f"  Exported {neuron_name} ({neuron_id})")
         except Exception as e:
             print(f"  Failed to export {neuron_name}: {e}")
-    
-    print(f"\nExported {exported_count}/{len(neurons)} meshes")
-    
+
+    print(f"\nExported {exported_count}/{len(neuron_ids)} meshes ({recycled_count} recycled)")
+
+    # Recycle EM snapshots from previous runs
+    em_snap_dir = os.path.join(results_dir, 'em_snaps')
+    if not os.path.isdir(em_snap_dir) or not os.listdir(em_snap_dir):
+        prev_snaps = _find_previous_em_snaps()
+        if prev_snaps:
+            print(f"\nRecycling EM snapshots from: {prev_snaps}")
+            os.makedirs(em_snap_dir, exist_ok=True)
+            snap_count = 0
+            for fname in os.listdir(prev_snaps):
+                if fname.endswith('.png'):
+                    src = os.path.join(prev_snaps, fname)
+                    dst = os.path.join(em_snap_dir, fname)
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+                        snap_count += 1
+            print(f"  Copied {snap_count} EM snapshots")
+
+    # Recycle geometric data from previous runs
+    geo_dir = os.path.join(results_dir, 'geometric_data')
+    if not os.path.isdir(geo_dir) or not os.listdir(geo_dir):
+        for prev_dir in _find_previous_results():
+            prev_geo = os.path.join(prev_dir, 'geometric_data')
+            if os.path.isdir(prev_geo) and os.listdir(prev_geo):
+                print(f"\nRecycling geometric data from: {prev_geo}")
+                os.makedirs(geo_dir, exist_ok=True)
+                for fname in os.listdir(prev_geo):
+                    src = os.path.join(prev_geo, fname)
+                    dst = os.path.join(geo_dir, fname)
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+                break
+
     # Generate EM overlay viewer
     print("\nGenerating EM overlay viewer...")
-    viewer_script = os.path.join(os.path.dirname(results_dir), "em_viewer.py")
-    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    viewer_script = os.path.join(script_dir, "em_viewer.py")
+
     if not os.path.exists(viewer_script):
         print(f"  Warning: EM viewer script not found at {viewer_script}")
         print("  You can run it manually later with: python em_viewer.py")
         return
-    
+
     try:
         # Run the EM viewer generator
         result = subprocess.run(
             [sys.executable, viewer_script],
-            cwd=os.path.dirname(results_dir),
+            cwd=script_dir,
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=120
         )
-        
+
         if result.returncode == 0:
             print("  EM viewer generated successfully!")
             print(f"  Output: {result.stdout}")
@@ -2820,6 +2709,18 @@ def export_meshes_and_generate_viewer(neurons, results_dir):
 
 if __name__ == "__main__":
     print("Starting comprehensive pairwise neuron overlap analysis...")
+    print(f"Results directory: {RESULTS_DIR}")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    # Report recycling sources
+    prev_dirs = _find_previous_results()
+    if prev_dirs:
+        print(f"\nFound {len(prev_dirs)} previous result(s) to recycle from:")
+        for d in prev_dirs[:3]:
+            print(f"  - {os.path.basename(d)}")
+    else:
+        print("\nNo previous results found; will compute everything from scratch.")
+
     start_time = time.time()
     
     try:
@@ -2848,13 +2749,26 @@ if __name__ == "__main__":
         print("="*60)
         save_final_combined_results(all_results, valid_names, THRESHOLDS_MICRONS)
 
-        # Fetch synapses once (optional overlay)
+        # Fetch synapses once (optional overlay) — try recycling first
         syn_df_global = None
-        try:
-            print("Fetching synapses for overlay (once)...")
-            syn_df_global = fetch_synapses_for_neurons(neuron_ids)
-        except Exception as e:
-            print(f"Synapse fetch skipped: {e}")
+        prev_syn = _find_previous_synapses()
+        if prev_syn:
+            try:
+                print(f"Recycling synapses from: {prev_syn}")
+                syn_df_global = pd.read_csv(prev_syn)
+                print(f"  Loaded {len(syn_df_global)} synapses from previous run")
+                # Save copy to new results directory
+                syn_copy = os.path.join(RESULTS_DIR, "synapses.csv")
+                syn_df_global.to_csv(syn_copy, index=False)
+            except Exception as e:
+                print(f"  Synapse recycle failed: {e}")
+                syn_df_global = None
+        if syn_df_global is None:
+            try:
+                print("Fetching synapses for overlay (once)...")
+                syn_df_global = fetch_synapses_for_neurons(neuron_ids)
+            except Exception as e:
+                print(f"Synapse fetch skipped: {e}")
 
         # Always build the high-quality meshes + overlaps HTML visualization
         print("\n" + "="*60)
@@ -2864,24 +2778,27 @@ if __name__ == "__main__":
         try:
             thr = THRESHOLDS_MICRONS[0]
             # Participants filters: plot only cells participating in contacts
-            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS"})
-            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS"})
-            all_include = mot_include.union(mos_include)
+            participant_sources = {"MOT", "MOS", "BIPS"}
+            participant_targets = {"HS", "VS", "BIPS"}
+            all_include = compute_contact_participants(all_results, thr, participant_sources, participant_targets)
+
+            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS", "VS", "BIPS"})
+            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS", "VS", "BIPS"})
 
             # All MOT+MOS (only participants)
             build_mesh_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
-                                        filename_suffix="ALL", source_group_filter={"MOT","MOS"},
-                                        target_group_filter={"HS","VS"}, include_names=all_include,
+                                        filename_suffix="ALL", source_group_filter=participant_sources,
+                                        target_group_filter=participant_targets, include_names=all_include,
                                         synapses_df=syn_df_global)
             # MOT-only (only HS targets)
             build_mesh_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                         filename_suffix="MOT_only", source_group_filter={"MOT"},
-                                        target_group_filter={"HS"}, include_names=mot_include,
+                                        target_group_filter={"HS","VS","BIPS"}, include_names=mot_include,
                                         synapses_df=syn_df_global)
             # MOS-only (HS and VS targets)
             build_mesh_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                         filename_suffix="MOS_only", source_group_filter={"MOS"},
-                                        target_group_filter={"HS","VS"}, include_names=mos_include,
+                                        target_group_filter={"HS","VS","BIPS"}, include_names=mos_include,
                                         synapses_df=syn_df_global)
         except Exception as e:
             print(f"Meshes + overlaps HTML failed (non-critical): {e}")
@@ -2891,9 +2808,11 @@ if __name__ == "__main__":
         # Always attempt to build LITE HTML (browser-friendly), even if heavy failed
         try:
             thr = THRESHOLDS_MICRONS[0]
-            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS"})
-            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS"})
-            all_include = mot_include.union(mos_include)
+            participant_sources = {"MOT", "MOS", "BIPS"}
+            participant_targets = {"HS", "VS", "BIPS"}
+            all_include = compute_contact_participants(all_results, thr, participant_sources, participant_targets)
+            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS","BIPS"})
+            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS","BIPS"})
 
             # All sources
             build_mesh_and_overlap_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
@@ -2933,12 +2852,12 @@ if __name__ == "__main__":
             build_mesh_and_overlap_html_lite(
                 neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                 hemi_filter='L', mot_mos_faces=50000, hs_vs_faces=12000, filename_suffix="MOS_only",
-                source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, include_names=mos_include, synapses_df=syn_df_global
+                source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, include_names=mos_include, synapses_df=syn_df_global
             )
             build_mesh_and_overlap_html_lite(
                 neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                 hemi_filter='R', mot_mos_faces=50000, hs_vs_faces=12000, filename_suffix="MOS_only",
-                source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, include_names=mos_include, synapses_df=syn_df_global
+                source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, include_names=mos_include, synapses_df=syn_df_global
             )
         except Exception as e:
             print(f"Meshes + overlaps LITE HTML failed (non-critical): {e}")
@@ -2948,20 +2867,22 @@ if __name__ == "__main__":
         # Also attempt a point-cloud visualization as a very robust fallback
         try:
             thr = THRESHOLDS_MICRONS[0]
-            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS"})
-            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS"})
-            all_include = mot_include.union(mos_include)
+            participant_sources = {"MOT", "MOS", "BIPS"}
+            participant_targets = {"HS", "VS", "BIPS"}
+            all_include = compute_contact_participants(all_results, thr, participant_sources, participant_targets)
+            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS","BIPS"})
+            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS","BIPS"})
             build_pointcloud_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               points_per_neuron=50000, patch_mode='points', max_patch_faces=100000,
-                                              filename_suffix="ALL", target_group_filter={"HS","VS"}, include_names=all_include,
+                                              filename_suffix="ALL", target_group_filter={"HS","VS","BIPS"}, include_names=all_include,
                                               synapses_df=syn_df_global)
             build_pointcloud_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               points_per_neuron=50000, patch_mode='points', max_patch_faces=100000,
-                                              filename_suffix="MOT_only", source_group_filter={"MOT"}, target_group_filter={"HS"}, include_names=mot_include,
+                                              filename_suffix="MOT_only", source_group_filter={"MOT"}, target_group_filter={"HS","VS","BIPS"}, include_names=mot_include,
                                               synapses_df=syn_df_global)
             build_pointcloud_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               points_per_neuron=50000, patch_mode='points', max_patch_faces=100000,
-                                              filename_suffix="MOS_only", source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, include_names=mos_include,
+                                              filename_suffix="MOS_only", source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, include_names=mos_include,
                                               synapses_df=syn_df_global)
         except Exception as e:
             print(f"Point-cloud HTML failed (non-critical): {e}")
@@ -2971,42 +2892,44 @@ if __name__ == "__main__":
         # Additionally produce wireframe alternatives (very light)
         try:
             thr = THRESHOLDS_MICRONS[0]
-            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS"})
-            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS"})
-            all_include = mot_include.union(mos_include)
+            participant_sources = {"MOT", "MOS", "BIPS"}
+            participant_targets = {"HS", "VS", "BIPS"}
+            all_include = compute_contact_participants(all_results, thr, participant_sources, participant_targets)
+            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS","BIPS"})
+            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS","BIPS"})
             # ALL
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               filename_suffix="ALL", include_names=all_include,
-                                              source_group_filter={"MOT","MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
+                                              source_group_filter=participant_sources, target_group_filter=participant_targets, synapses_df=syn_df_global)
             # MOT-only
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               filename_suffix="MOT_only", include_names=mot_include,
-                                              source_group_filter={"MOT"}, target_group_filter={"HS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
             # MOS-only
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               filename_suffix="MOS_only", include_names=mos_include,
-                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
             # Hemi L/R
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='L', filename_suffix="ALL", include_names=all_include,
-                                              source_group_filter={"MOT","MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
+                                              source_group_filter=participant_sources, target_group_filter=participant_targets, synapses_df=syn_df_global)
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='R', filename_suffix="ALL", include_names=all_include,
-                                              source_group_filter={"MOT","MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
+                                              source_group_filter=participant_sources, target_group_filter=participant_targets, synapses_df=syn_df_global)
             # Hemi L/R MOT-only
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='L', filename_suffix="MOT_only", include_names=mot_include,
-                                              source_group_filter={"MOT"}, target_group_filter={"HS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='R', filename_suffix="MOT_only", include_names=mot_include,
-                                              source_group_filter={"MOT"}, target_group_filter={"HS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
             # Hemi L/R MOS-only
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='L', filename_suffix="MOS_only", include_names=mos_include,
-                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='R', filename_suffix="MOS_only", include_names=mos_include,
-                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
         except Exception as e:
             print(f"Wireframe HTML failed (non-critical): {e}")
 
@@ -3089,12 +3012,6 @@ if __name__ == "__main__":
             print(f"Detailed geometric data saving failed (non-critical): {e}")
         
         # Save individual pair geometric data
-        print("\n" + "="*60)
-        print("STEP 7: Saving individual pair geometric data")
-        print("="*60)
-        try:
-            save_individual_pair_geometric_data(all_results, RESULTS_DIR)
-        except Exception as e:
             print(f"Individual pair geometric data saving failed (non-critical): {e}")
         
         # Print summary

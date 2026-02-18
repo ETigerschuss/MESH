@@ -1,8 +1,8 @@
 """
-EM Viewer - Standalone Version
+Skeleton EM Viewer - Navis Skeleton Rendering
 ===============================
 
-Complete self-contained EM viewer generator with integrated HTML template.
+Complete self-contained EM viewer with navis skeleton rendering with integrated HTML template.
 No external dependencies beyond standard Python libraries and Plotly.
 
 Features:
@@ -12,10 +12,10 @@ Features:
 - Highlights selected contact (solid red) or synapse (larger yellow) in 3D view
 
 Usage:
-    python em_viewer.py
+    python skeleton_em_viewer.py
 
 Output:
-    comprehensive_overlap_results/em_viewer.html
+    comprehensive_overlap_results/skeleton_em_viewer.html
 """
 
 import os
@@ -24,10 +24,11 @@ import base64
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from typing import Tuple
 from PIL import Image
+import trimesh
+import navis
 
-# Neuron IDs - aligned to analysis script (restricted set + BIPS)
+# Neuron IDs - restricted set + BIPS
 NEURON_IDS = {
     720575940618519710: 'MOT_L', 720575940630139386: 'MOT_R',
     720575940622361270: 'MOS_L', 720575940622168052: 'MOS_R',
@@ -41,33 +42,20 @@ NEURON_IDS = {
     720575940623618708: 'BIPS_L', 720575940622581173: 'BIPS_R',
 }
 
-# Group colors (single hue per group)
-GROUP_COLOR = {
-    'MOT': '#5E3C99',   # MOT
-    'MOS': '#4D9221',   # MOS
-    'VS':  '#D14900',   # VS
-    'HS':  '#C51B7D',   # HS (HSN/HSE/HSS)
-    'BIPS': '#000000',  # BIPS
+# Neuroscience colors (MOS, VS, MOT, HS, BIPS)
+NEURON_COLORS = {
+    'MOS_L': '#4D9221', 'MOS_R': '#4D9221',
+    'VS1_L': '#D14900', 'VS1_R': '#D14900',
+    'VS2_L': '#D14900', 'VS2_R': '#D14900',
+    'VS3_L': '#D14900', 'VS3_R': '#D14900',
+    'VS4_L': '#D14900', 'VS4_R': '#D14900',
+    'MOT_L': '#5E3C99', 'MOT_R': '#5E3C99',
+    'HSN_L': '#C51B7D', 'HSN_R': '#C51B7D',
+    'HSE_L': '#C51B7D', 'HSE_R': '#C51B7D',
+    'HSS_L': '#C51B7D', 'HSS_R': '#C51B7D',
+    'BIPS_L': '#000000', 'BIPS_R': '#000000',
 }
 
-def _group(name: str) -> str:
-    if name.startswith('MOT'): return 'MOT'
-    if name.startswith('MOS'): return 'MOS'
-    if name.startswith('VS'):  return 'VS'
-    if name.startswith('HS'):  return 'HS'
-    if name.startswith('BIPS'): return 'BIPS'
-    return 'OTHER'
-
-def _build_color_map(neuron_ids: dict[int, str]) -> dict[str, str]:
-    colors = {}
-    for nm in neuron_ids.values():
-        grp = _group(nm)
-        colors[nm] = GROUP_COLOR.get(grp, '#888888')
-    return colors
-
-NEURON_COLORS = _build_color_map(NEURON_IDS)
-
-# Default results dir: use latest comprehensive_overlap_results_* if present
 def _default_results_dir():
     base = os.path.dirname(os.path.abspath(__file__))
     candidates = [d for d in os.listdir(base)
@@ -78,160 +66,6 @@ def _default_results_dir():
     return 'comprehensive_overlap_results'
 
 RESULTS_DIR = os.environ.get('MESH_RESULTS_DIR', _default_results_dir())
-
-
-def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
-    hex_color = hex_color.lstrip('#')
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-
-
-def ensure_em_snapshots(results_dir: str, contacts: pd.DataFrame, synapses: pd.DataFrame,
-                        size_px: int = 512, z_range: int = 20):
-    """Ensure EM snapshots exist; if not, download center + Z-stack (±z_range slices) with segmentation overlay."""
-    em_snap_dir = os.path.join(results_dir, 'em_snaps')
-    os.makedirs(em_snap_dir, exist_ok=True)
-
-    # Check if we already have z-stack images (not just center slices)
-    existing = [f for f in os.listdir(em_snap_dir) if f.endswith('.png')]
-    n_contacts = len(contacts)
-    n_synapses = len(synapses)
-    n_items = n_contacts + n_synapses
-    expected_with_zstack = n_items * (2 * z_range + 1)  # center + ±z_range
-    if len(existing) >= expected_with_zstack * 0.9:  # 90% threshold
-        print(f"[snapshots] Found {len(existing)} images (expected ~{expected_with_zstack}), skipping download")
-        return
-    elif len(existing) > 0:
-        print(f"[snapshots] Found {len(existing)} images but need ~{expected_with_zstack} for Z-stacks, downloading missing...")
-
-    try:
-        from cloudvolume import CloudVolume
-    except ImportError:
-        print("[snapshots] CloudVolume not installed; cannot download EM snapshots")
-        return
-
-    print(f"[snapshots] Downloading center + Z-stack (±{z_range}) to {em_snap_dir}")
-    print(f"            {n_contacts} contacts + {n_synapses} synapses = {(n_contacts + n_synapses) * (2 * z_range + 1)} images")
-
-    try:
-        em_vol = CloudVolume('https://bossdb-open-data.s3.amazonaws.com/flywire/fafbv14',
-                             mip=1, use_https=True, progress=False)
-        seg_vol = CloudVolume('precomputed://gs://flywire_v141_m783',
-                              mip=0, use_https=True, progress=False)
-    except Exception as e:
-        print(f"[snapshots] Failed to open CloudVolume: {e}")
-        return
-
-    name_to_id = {v: k for k, v in NEURON_IDS.items()}
-
-    em_res_xy = float(em_vol.resolution[0])
-    em_res_z = float(em_vol.resolution[2])
-    seg_res_xy = float(seg_vol.resolution[0])
-    seg_res_z = float(seg_vol.resolution[2])
-    resolution_ratio = seg_res_xy / em_res_xy  # typically 2.0
-
-    def grab(center_nm, source_name, target_name, kind: str, idx: int, z_offset: int = 0):
-        """Download one EM slice with segmentation overlay at z_offset from center."""
-        # Build output filename
-        if z_offset == 0:
-            out_path = os.path.join(em_snap_dir, f"{kind}_{idx}.png")
-        else:
-            sign = '+' if z_offset >= 0 else '-'
-            out_path = os.path.join(em_snap_dir,
-                                    f"{kind}_{idx}_z{sign}{abs(z_offset):03d}.png")
-        if os.path.exists(out_path):
-            return True  # already downloaded
-
-        try:
-            center_nm = np.array(center_nm, dtype=float)
-
-            half_nm = (size_px * em_res_xy) / 2.0
-
-            # EM voxel coordinates
-            em_center_vox = center_nm / np.array(em_vol.resolution)
-            x0 = int(em_center_vox[0] - size_px // 2)
-            x1 = int(em_center_vox[0] + size_px // 2)
-            y0 = int(em_center_vox[1] - size_px // 2)
-            y1 = int(em_center_vox[1] + size_px // 2)
-            z = int(em_center_vox[2]) + z_offset
-
-            # Segmentation voxel coordinates
-            seg_center_vox = center_nm / np.array(seg_vol.resolution)
-            seg_half = int(size_px / resolution_ratio / 2)
-            sx0 = int(seg_center_vox[0] - seg_half)
-            sx1 = int(seg_center_vox[0] + seg_half)
-            sy0 = int(seg_center_vox[1] - seg_half)
-            sy1 = int(seg_center_vox[1] + seg_half)
-            sz = int(seg_center_vox[2]) + z_offset
-
-            em_raw = np.asarray(em_vol[x0:x1, y0:y1, z:z+1]).squeeze()
-            seg_raw = np.asarray(seg_vol[sx0:sx1, sy0:sy1, sz:sz+1]).squeeze()
-
-            if em_raw.ndim != 2 or seg_raw.ndim != 2:
-                return False
-
-            em_slice = np.clip(em_raw, 0, 255).astype(np.uint8)
-
-            # Upsample segmentation to match EM resolution
-            fx = max(1, int(np.ceil(em_slice.shape[0] / seg_raw.shape[0])))
-            fy = max(1, int(np.ceil(em_slice.shape[1] / seg_raw.shape[1])))
-            seg_up = np.repeat(np.repeat(seg_raw.astype(np.int64), fx, axis=0), fy, axis=1)
-            # Pad if still smaller
-            if seg_up.shape[0] < em_slice.shape[0] or seg_up.shape[1] < em_slice.shape[1]:
-                seg_up = np.pad(seg_up,
-                                ((0, max(0, em_slice.shape[0] - seg_up.shape[0])),
-                                 (0, max(0, em_slice.shape[1] - seg_up.shape[1]))),
-                                mode='edge')
-            seg_up = seg_up[:em_slice.shape[0], :em_slice.shape[1]]
-
-            # Build RGB image
-            img = np.stack([em_slice, em_slice, em_slice], axis=-1).astype(np.uint8)
-
-            # Color overlay
-            sid = name_to_id.get(source_name)
-            tid = name_to_id.get(target_name)
-            if sid is not None:
-                mask = seg_up == sid
-                c = np.array(_hex_to_rgb(NEURON_COLORS.get(source_name, '#ff0000')), dtype=np.uint8)
-                img[mask] = (img[mask].astype(float) * 0.4 + c.astype(float) * 0.6).astype(np.uint8)
-            if tid is not None:
-                mask = seg_up == tid
-                c = np.array(_hex_to_rgb(NEURON_COLORS.get(target_name, '#00ff00')), dtype=np.uint8)
-                img[mask] = (img[mask].astype(float) * 0.4 + c.astype(float) * 0.6).astype(np.uint8)
-
-            Image.fromarray(img).save(out_path)
-            return True
-
-        except Exception as e:
-            if z_offset == 0:
-                print(f"[snapshots] Failed {kind} {idx}: {e}")
-            return False
-
-    # Download contacts
-    total_ok = 0
-    for i, (_, row) in enumerate(contacts.iterrows()):
-        center = (float(row['x']), float(row['y']), float(row['z']))
-        src, tgt = row['source'], row['target']
-        cidx = int(row['idx'])
-        for zo in range(-z_range, z_range + 1):
-            if grab(center, src, tgt, 'contact', cidx, zo):
-                total_ok += 1
-        if (i + 1) % 10 == 0:
-            print(f"  contacts: {i+1}/{len(contacts)}")
-    print(f"[snapshots] Downloaded {total_ok} contact images")
-
-    # Download synapses
-    syn_col = 'idx' if 'idx' in synapses.columns else 'index'
-    total_ok = 0
-    for i, (_, row) in enumerate(synapses.iterrows()):
-        center = (float(row['x']), float(row['y']), float(row['z']))
-        src, tgt = row['source'], row['target']
-        sidx = int(row[syn_col])
-        for zo in range(-z_range, z_range + 1):
-            if grab(center, src, tgt, 'synapse', sidx, zo):
-                total_ok += 1
-        if (i + 1) % 10 == 0:
-            print(f"  synapses: {i+1}/{len(synapses)}")
-    print(f"[snapshots] Downloaded {total_ok} synapse images")
 
 # HTML Template (integrated)
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -442,6 +276,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             font-size: 12px;
         }
     </style>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
     <div class="container">
@@ -538,13 +373,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         let currentListIndex = -1;
         let isUpdatingHighlight = false;
         
-        // Handle broken image loads (e.g. missing Z-stack files)
-        emImage.addEventListener('error', function() {
-            emImage.style.display = 'none';
-            emPlaceholder.style.display = 'block';
-            emPlaceholder.textContent = `Image file not found for ${currentKind} ${currentIdx} at z=${currentZ}`;
-        });
-        
         // Track mouse down for drag detection
         let mouseDownX = 0;
         let mouseDownY = 0;
@@ -574,7 +402,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const itemList = kind === 'contact' ? contactList : synapseList;
             
             return itemList
-                .filter(item => visibleNeurons.includes(item.source) || visibleNeurons.includes(item.target))
+                .filter(item => visibleNeurons.includes(item.source))
                 .map(item => item.idx)
                 .sort((a, b) => a - b);
         }
@@ -646,14 +474,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         function loadImage(kind, idx, zOffset) {
+            const imgData = snapshotMap[kind]?.[idx];
+            if (!imgData) {
+                emImage.style.display = 'none';
+                emPlaceholder.style.display = 'block';
+                emPlaceholder.textContent = `No snapshot for ${kind} ${idx}`;
+                return;
+            }
+            
             if (zOffset === 0) {
-                const imgData = snapshotMap[kind]?.[idx];
-                if (!imgData) {
-                    emImage.style.display = 'none';
-                    emPlaceholder.style.display = 'block';
-                    emPlaceholder.textContent = `No snapshot for ${kind} ${idx}`;
-                    return;
-                }
                 emImage.src = imgData;
                 emImage.style.display = 'block';
                 emPlaceholder.style.display = 'none';
@@ -664,22 +493,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         function loadZStackImage(kind, idx, zOffset) {
-            const sign = zOffset >= 0 ? '+' : '-';
-            const pad = String(Math.abs(zOffset)).padStart(3, '0');
-            const key = `${idx}_z${sign}${pad}`;
-            const imgData = snapshotMap[kind]?.[key];
+            const zStr = zOffset >= 0 ? `z+${String(Math.abs(zOffset)).padStart(3, '0')}` : `z-${String(Math.abs(zOffset)).padStart(3, '0')}`;
+            const filename = `${kind}_${idx}_${zStr}.png`;
+            const path = `em_snaps/${filename}`;
             
-            if (imgData) {
-                emImage.src = imgData;
+            emImage.onerror = function() {
+                const centerData = snapshotMap[kind]?.[idx];
+                if (centerData && zOffset !== 0) {
+                    emImage.src = centerData;
+                }
+            };
+            
+            emImage.onload = function() {
                 emImage.style.display = 'block';
                 emPlaceholder.style.display = 'none';
                 updateZValue(zOffset);
-            } else {
-                // No z-stack image available - show placeholder
-                emImage.style.display = 'none';
-                emPlaceholder.style.display = 'block';
-                emPlaceholder.textContent = `No Z-stack image for ${kind} ${idx} at z=${zOffset}`;
-            }
+            };
+            
+            emImage.src = path;
         }
         
         function updateZValue(zOffset) {
@@ -771,36 +602,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         });
         
-        // Item navigation helper
-        function navigateToItem(newListIndex) {
-            const newIdx = currentList[newListIndex];
-            const itemList = currentKind === 'contact' ? contactList : synapseList;
-            const item = itemList.find(i => i.idx === newIdx);
-            if (!item) return;
-
-            currentListIndex = newListIndex;
-            currentIdx = newIdx;
-            currentZ = 0;
-            zSlider.value = 0;
-
-            const label = currentKind.charAt(0).toUpperCase() + currentKind.slice(1);
-            emTitle.textContent = `${label} #${newIdx}`;
-            emLocation.textContent = `${item.source} → ${item.target} at (${Math.round(item.x)}, ${Math.round(item.y)}, ${Math.round(item.z)})`;
-            itemInfo.textContent = `${label} ${newListIndex + 1}/${currentList.length} (idx: ${newIdx})`;
-
-            loadImage(currentKind, newIdx, 0);
-            highlightPoint(currentKind, newIdx);
-        }
-
+        // Item navigation
         btnPrevItem.addEventListener('click', function() {
             if (currentKind && currentListIndex > 0) {
-                navigateToItem(currentListIndex - 1);
+                currentListIndex--;
+                const newIdx = currentList[currentListIndex];
+                currentIdx = newIdx;
+                loadImage(currentKind, newIdx, currentZ);
+                itemInfo.textContent = `${currentKind.charAt(0).toUpperCase() + currentKind.slice(1)} ${currentListIndex + 1}/${currentList.length} (idx: ${newIdx})`;
+                highlightPoint(currentKind, newIdx);
             }
         });
-
+        
         btnNextItem.addEventListener('click', function() {
             if (currentKind && currentListIndex < currentList.length - 1) {
-                navigateToItem(currentListIndex + 1);
+                currentListIndex++;
+                const newIdx = currentList[currentListIndex];
+                currentIdx = newIdx;
+                loadImage(currentKind, newIdx, currentZ);
+                itemInfo.textContent = `${currentKind.charAt(0).toUpperCase() + currentKind.slice(1)} ${currentListIndex + 1}/${currentList.length} (idx: ${newIdx})`;
+                highlightPoint(currentKind, newIdx);
             }
         });
         
@@ -923,33 +744,56 @@ def load_synapses(results_dir):
     return df[['x', 'y', 'z', 'source', 'target']].reset_index()
 
 
-def load_mesh_pointcloud(neuron_name, mesh_dir, max_points=10000):
-    """Load mesh as point cloud"""
+def load_mesh_skeleton(neuron_name, mesh_dir, downsample_factor=50):
+    """Load mesh and convert to skeleton lines using navis"""
+    import trimesh
+    import navis
+
     neuron_id = {v: k for k, v in NEURON_IDS.items()}[neuron_name]
     mesh_file = os.path.join(mesh_dir, f"{neuron_id}.obj")
-    
+
     if not os.path.exists(mesh_file):
         return None, None, None
-    
-    vertices = []
-    with open(mesh_file, 'r') as f:
-        for line in f:
-            if line.startswith('v '):
-                vertices.append([float(x) for x in line.split()[1:4]])
-    
-    vertices = np.array(vertices)
-    if len(vertices) > max_points:
-        stride = len(vertices) // max_points
-        vertices = vertices[::stride][:max_points]
-    
-    return vertices[:, 0], vertices[:, 1], vertices[:, 2]
+
+    try:
+        # Load mesh
+        mesh = trimesh.load(mesh_file)
+
+        # Convert to navis MeshNeuron
+        mesh_neuron = navis.MeshNeuron(mesh, id=neuron_id, name=neuron_name)
+
+        # Downsample to reduce complexity
+        mesh_neuron_ds = navis.downsample_neuron(mesh_neuron, downsampling_factor=downsample_factor)        # Get vertices and faces
+        vertices = mesh_neuron_ds.vertices
+        faces = mesh_neuron_ds.faces
+        
+        # Create line segments from faces (edges)
+        edges = set()
+        for face in faces:
+            # Each triangular face has 3 edges
+            edges.add(tuple(sorted([face[0], face[1]])))
+            edges.add(tuple(sorted([face[1], face[2]])))
+            edges.add(tuple(sorted([face[2], face[0]])))
+        
+        # Convert edges to line coordinates
+        x_lines, y_lines, z_lines = [], [], []
+        for v1_idx, v2_idx in edges:
+            v1 = vertices[v1_idx]
+            v2 = vertices[v2_idx]
+            x_lines.extend([v1[0], v2[0], None])  # None creates a break
+            y_lines.extend([v1[1], v2[1], None])
+            z_lines.extend([v1[2], v2[2], None])
+        
+        return np.array(x_lines), np.array(y_lines), np.array(z_lines)
+    except Exception as e:
+        print(f"Error loading skeleton for {neuron_name}: {e}")
+        return None, None, None
 
 
 def build_figure(mesh_dir):
     """Build the 3D Plotly figure with highlighting capability"""
     contacts = load_contacts(RESULTS_DIR)
     synapses = load_synapses(RESULTS_DIR)
-    ensure_em_snapshots(RESULTS_DIR, contacts, synapses)
     
     traces = []
     trace_info = {}
@@ -959,15 +803,16 @@ def build_figure(mesh_dir):
         color = NEURON_COLORS.get(neuron_name, '#888888')
         
         # 1. Mesh trace
-        x, y, z = load_mesh_pointcloud(neuron_name, mesh_dir)
+        x, y, z = load_mesh_skeleton(neuron_name, mesh_dir)
         if x is not None:
             trace_idx = len(traces)
             trace_info[f"{neuron_name}_mesh"] = trace_idx
             traces.append(go.Scatter3d(
                 x=x, y=y, z=z,
-                mode='markers',
+                mode='lines',
                 name=f"{neuron_name}_mesh",
-                marker=dict(size=2, color=color, opacity=0.3),
+                line=dict(width=1, color=color),
+                opacity=0.5,
                 visible=False,
                 hovertemplate=f'{neuron_name}<br>(%{{x}}, %{{y}}, %{{z}})<extra></extra>',
                 customdata=np.column_stack([x, y, z, 
@@ -1081,89 +926,33 @@ def build_figure(mesh_dir):
     return fig, contacts, synapses, trace_info
 
 
-def index_em_snapshots(em_snap_dir, contacts, synapses, z_range: int = 20):
-    """Index EM snapshots: embed CENTER slices as base64, reference Z-stack by filename.
-
-    Center images are embedded so the viewer works as a standalone HTML file.
-    Z-stack images are referenced as relative file paths to keep HTML size manageable
-    (~42 MB for centers vs ~1.7 GB if all Z-stack were embedded).
-
-    Returns dict: snapshot_map[kind][idx] = base64 data URI for center,
-                  snapshot_map[kind][f"{idx}_z+003"] = relative file path for z-offsets.
-    """
+def index_em_snapshots(em_snap_dir, contacts, synapses):
+    """Index and embed EM snapshots as base64"""
     snapshot_map = {'contact': {}, 'synapse': {}}
-
-    if not os.path.isdir(em_snap_dir):
-        print(f"[snapshots] Directory not found: {em_snap_dir} (no EM images will display)")
-        return snapshot_map
-
-    # Relative path from the HTML file to the em_snaps directory
-    rel_snap_dir = os.path.basename(em_snap_dir)
-
-    def _embed(filepath):
-        if os.path.exists(filepath):
-            with open(filepath, 'rb') as f:
-                return f"data:image/png;base64,{base64.b64encode(f.read()).decode()}"
-        return None
-
-    def _file_ref(filepath, filename):
-        """Return relative file path if file exists, else None."""
-        if os.path.exists(filepath):
-            return f"{rel_snap_dir}/{filename}"
-        return None
-
+    
     # Index contacts
     for idx in contacts['idx'].unique():
-        idx = int(idx)
-        # Center: embed as base64
-        for candidate in [f"contact_{idx}_segmented.png", f"contact_{idx}.png"]:
-            b64 = _embed(os.path.join(em_snap_dir, candidate))
-            if b64:
-                snapshot_map['contact'][idx] = b64
-                break
-        # Z-stack: reference by file path (not embedded)
-        for zo in range(-z_range, z_range + 1):
-            if zo == 0:
-                continue
-            sign = '+' if zo >= 0 else '-'
-            key = f"{idx}_z{sign}{abs(zo):03d}"
-            for candidate in [f"contact_{idx}_z{sign}{abs(zo):03d}_segmented.png",
-                              f"contact_{idx}_z{sign}{abs(zo):03d}.png"]:
-                ref = _file_ref(os.path.join(em_snap_dir, candidate), candidate)
-                if ref:
-                    snapshot_map['contact'][key] = ref
-                    break
-
-    n_center = sum(1 for k in snapshot_map['contact'] if isinstance(k, int))
-    n_zstack = len(snapshot_map['contact']) - n_center
-    print(f"[snapshots] Indexed {n_center} contact centers (embedded) + {n_zstack} Z-stack refs")
-
+        segmented_file = os.path.join(em_snap_dir, f"contact_{idx}_segmented.png")
+        if os.path.exists(segmented_file):
+            with open(segmented_file, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode()
+                snapshot_map['contact'][int(idx)] = f"data:image/png;base64,{b64}"
+    
+    print(f"[snapshots] Indexed {len(snapshot_map['contact'])} contacts")
+    
     # Index synapses
-    syn_col = 'idx' if 'idx' in synapses.columns else 'index'
-    for idx in synapses[syn_col].unique():
-        idx = int(idx)
-        for candidate in [f"synapse_{idx}_segmented.png", f"synapse_{idx}.png"]:
-            b64 = _embed(os.path.join(em_snap_dir, candidate))
-            if b64:
-                snapshot_map['synapse'][idx] = b64
-                break
-        for zo in range(-z_range, z_range + 1):
-            if zo == 0:
-                continue
-            sign = '+' if zo >= 0 else '-'
-            key = f"{idx}_z{sign}{abs(zo):03d}"
-            for candidate in [f"synapse_{idx}_z{sign}{abs(zo):03d}_segmented.png",
-                              f"synapse_{idx}_z{sign}{abs(zo):03d}.png"]:
-                ref = _file_ref(os.path.join(em_snap_dir, candidate), candidate)
-                if ref:
-                    snapshot_map['synapse'][key] = ref
-                    break
-
-    n_center = sum(1 for k in snapshot_map['synapse'] if isinstance(k, int))
-    n_zstack = len(snapshot_map['synapse']) - n_center
-    print(f"[snapshots] Indexed {n_center} synapse centers (embedded) + {n_zstack} Z-stack refs")
-
+    for idx in synapses['index'].unique():
+        segmented_file = os.path.join(em_snap_dir, f"synapse_{idx}_segmented.png")
+        if os.path.exists(segmented_file):
+            with open(segmented_file, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode()
+                snapshot_map['synapse'][int(idx)] = f"data:image/png;base64,{b64}"
+    
+    print(f"[snapshots] Indexed {len(snapshot_map['synapse'])} synapses")
+    
     return snapshot_map
+
+
 def generate_html(fig, contacts, synapses, trace_info, em_snap_dir):
     """Generate improved HTML with integrated template"""
     snapshot_mapping = index_em_snapshots(em_snap_dir, contacts, synapses)
@@ -1234,14 +1023,15 @@ def main():
     html = generate_html(fig, contacts, synapses, trace_info, em_snap_dir)
     
     print("\n[3/3] Writing output...")
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    output_file = os.path.join(RESULTS_DIR, 'em_viewer.html')
+    output_file = os.path.join(RESULTS_DIR, 'skeleton_em_viewer.html')
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(html)
-
+    
     print(f"\nComplete! Open: {output_file}")
     print("="*70)
 
 
 if __name__ == "__main__":
     main()
+
+

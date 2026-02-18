@@ -1,9 +1,13 @@
 # Large data directories
-comprehensive_overlap_results/
+comprehensive_overlap_results*/
 neuron_meshes/
 em_snaps/
+overlap_cache/
 *.obj
 *.png
+
+# Pipeline output
+pipeline_log.txt
 
 # Python cache
 __pycache__/
@@ -52,5 +56,6 @@ simple_mesh_*.py
 # Large output files
 *.html
 *.htm
+*.svg
 comprehensive_overlap_results/*.csv
 comprehensive_overlap_results/*.png
