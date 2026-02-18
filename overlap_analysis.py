@@ -547,7 +547,7 @@ def build_meshes_only_html(neurons, valid_names, output_dir, title_suffix="All n
         neuron = neurons.get(name)
         if neuron is None:
             continue
-        traces.append(_mesh_trace_from_neuron(neuron, name, color_map.get(name, '#888888'), opacity=0.22))
+        traces.append(_mesh_trace_from_neuron(neuron, name, color_map.get(name, '#888888'), opacity=0.22, max_faces_per_mesh=30000))
 
     fig = go.Figure(data=traces)
     fig.update_layout(
@@ -590,6 +590,30 @@ def _hemi_of(name: str) -> str | None:
     if name.endswith('_R'):
         return 'R'
     return None
+
+def _build_overlay_toggle_js(syn_idx: list[int], mid_idx: list[int], cen_idx: list[int]) -> str:
+    """Return JavaScript that toggles Plotly trace visibility via checkboxes."""
+    return f"""
+    function toggleTraces() {{
+        var gd = document.querySelectorAll('.plotly-graph-div')[0];
+        var synIdx = {syn_idx};
+        var midIdx = {mid_idx};
+        var cenIdx = {cen_idx};
+        var synOn = document.getElementById('chk_syn') ? document.getElementById('chk_syn').checked : true;
+        var midOn = document.getElementById('chk_mid') ? document.getElementById('chk_mid').checked : true;
+        var cenOn = document.getElementById('chk_cen') ? document.getElementById('chk_cen').checked : true;
+        var update = {{}};
+        var indices = [];
+        var vis = [];
+        synIdx.forEach(function(i) {{ indices.push(i); vis.push(synOn); }});
+        midIdx.forEach(function(i) {{ indices.push(i); vis.push(midOn); }});
+        cenIdx.forEach(function(i) {{ indices.push(i); vis.push(cenOn); }});
+        if (indices.length > 0) {{
+            Plotly.restyle(gd, {{'visible': vis}}, indices);
+        }}
+    }}
+    """
+
 
 def _build_color_map(valid_names):
     """Assign group-based colors (L/R share the same hue):
@@ -959,7 +983,30 @@ def build_mesh_and_overlap_html(neurons, all_results, valid_names, thresholds_mi
 
     suffix = ("_" + filename_suffix) if filename_suffix else ""
     html_path = os.path.join(output_dir, f"meshes_and_overlaps{suffix}_{threshold_um}um.html")
-    fig.write_html(html_path)
+
+    # --- Toggle checkboxes for synapses, contact midpoints, and centroids ---
+    syn_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Synapses']
+    mid_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Contact vertex midpoints']
+    cen_idx = [i for i, t in enumerate(fig.data) if 'Top5 centroids' in (getattr(t, 'name', '') or '')]
+    overlay_idx = sorted(syn_idx + mid_idx + cen_idx)
+    if overlay_idx:
+        raw_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx)
+        full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>
+<div style="position:fixed;top:10px;left:10px;z-index:999;background:rgba(255,255,255,0.92);
+padding:10px 14px;border-radius:8px;border:1px solid #aaa;font-family:Arial,sans-serif;font-size:13px;">
+  <b>Overlay toggles</b><br>
+  {'<label><input type="checkbox" id="chk_syn" checked onchange="toggleTraces()"> Synapses</label><br>' if syn_idx else ''}
+  {'<label><input type="checkbox" id="chk_mid" checked onchange="toggleTraces()"> Contact midpoints</label><br>' if mid_idx else ''}
+  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-5 centroids</label>' if cen_idx else ''}
+</div>
+{raw_html}
+<script>{checkbox_js}</script>
+</body></html>"""
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(full_html)
+    else:
+        fig.write_html(html_path)
     print(f"Saved 3D mesh + overlap visualization: {html_path}")
 
 def build_mesh_and_overlap_html_lite(neurons, all_results, valid_names, thresholds_microns, output_dir,
@@ -1134,10 +1181,35 @@ def build_mesh_and_overlap_html_lite(neurons, all_results, valid_names, threshol
         paper_bgcolor='white', plot_bgcolor='white', width=1400, height=1100,
         margin=dict(l=0, r=0, t=60, b=0)
     )
+    # --- Toggle checkboxes for synapses, contact midpoints, and centroids ---
+    syn_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Synapses']
+    mid_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Contact vertex midpoints']
+    cen_idx = [i for i, t in enumerate(fig.data) if 'Top5 centroids' in (getattr(t, 'name', '') or '')]
+
     hemi_suffix = f"_hemi_{hemi_filter}" if hemi_filter else ""
     extra_suffix = ("_" + filename_suffix) if filename_suffix else ""
     html_path = os.path.join(output_dir, f"meshes_and_overlaps_LITE{hemi_suffix}{extra_suffix}_{threshold_um}um.html")
-    fig.write_html(html_path)
+
+    overlay_idx = sorted(syn_idx + mid_idx + cen_idx)
+    if overlay_idx:
+        # Write HTML with custom checkbox controls
+        raw_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx)
+        full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>
+<div style="position:fixed;top:10px;left:10px;z-index:999;background:rgba(255,255,255,0.92);
+padding:10px 14px;border-radius:8px;border:1px solid #aaa;font-family:Arial,sans-serif;font-size:13px;">
+  <b>Overlay toggles</b><br>
+  {'<label><input type="checkbox" id="chk_syn" checked onchange="toggleTraces()"> Synapses</label><br>' if syn_idx else ''}
+  {'<label><input type="checkbox" id="chk_mid" checked onchange="toggleTraces()"> Contact midpoints</label><br>' if mid_idx else ''}
+  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-5 centroids</label>' if cen_idx else ''}
+</div>
+{raw_html}
+<script>{checkbox_js}</script>
+</body></html>"""
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(full_html)
+    else:
+        fig.write_html(html_path)
     print(f"Saved LITE 3D mesh + overlap visualization: {html_path}")
 
 def build_pointcloud_and_overlap_html(neurons, all_results, valid_names, thresholds_microns, output_dir,
@@ -1325,7 +1397,30 @@ def build_pointcloud_and_overlap_html(neurons, all_results, valid_names, thresho
 
     suffix = ("_" + filename_suffix) if filename_suffix else ""
     html_path = os.path.join(output_dir, f"meshes_and_overlaps_POINTCLOUD{suffix}_{threshold_um}um.html")
-    fig.write_html(html_path)
+
+    # --- Toggle checkboxes for synapses, contact midpoints, and centroids ---
+    syn_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Synapses']
+    mid_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Contact vertex midpoints']
+    cen_idx = [i for i, t in enumerate(fig.data) if 'Top5 centroids' in (getattr(t, 'name', '') or '')]
+    overlay_idx = sorted(syn_idx + mid_idx + cen_idx)
+    if overlay_idx:
+        raw_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx)
+        full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>
+<div style="position:fixed;top:10px;left:10px;z-index:999;background:rgba(255,255,255,0.92);
+padding:10px 14px;border-radius:8px;border:1px solid #aaa;font-family:Arial,sans-serif;font-size:13px;">
+  <b>Overlay toggles</b><br>
+  {'<label><input type="checkbox" id="chk_syn" checked onchange="toggleTraces()"> Synapses</label><br>' if syn_idx else ''}
+  {'<label><input type="checkbox" id="chk_mid" checked onchange="toggleTraces()"> Contact midpoints</label><br>' if mid_idx else ''}
+  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-5 centroids</label>' if cen_idx else ''}
+</div>
+{raw_html}
+<script>{checkbox_js}</script>
+</body></html>"""
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(full_html)
+    else:
+        fig.write_html(html_path)
     print(f"Saved point-cloud 3D visualization: {html_path}")
 
 def _wireframe_edges_from_faces(verts: np.ndarray, faces: np.ndarray, max_edges: int = 80000, seed: int = 42):
@@ -1432,7 +1527,30 @@ def build_overlap_wireframe_html_lite(neurons, all_results, valid_names, thresho
     hemi_suffix = f"_hemi_{hemi_filter}" if hemi_filter else ""
     extra_suffix = ("_" + filename_suffix) if filename_suffix else ""
     path = os.path.join(output_dir, f"overlaps_WIREFRAME{hemi_suffix}{extra_suffix}_{threshold_um}um.html")
-    fig.write_html(path)
+
+    # --- Toggle checkboxes for synapses, contact midpoints, and centroids ---
+    syn_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Synapses']
+    mid_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Contact vertex midpoints']
+    cen_idx = [i for i, t in enumerate(fig.data) if 'Top5 centroids' in (getattr(t, 'name', '') or '')]
+    overlay_idx = sorted(syn_idx + mid_idx + cen_idx)
+    if overlay_idx:
+        raw_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx)
+        full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>
+<div style="position:fixed;top:10px;left:10px;z-index:999;background:rgba(255,255,255,0.92);
+padding:10px 14px;border-radius:8px;border:1px solid #aaa;font-family:Arial,sans-serif;font-size:13px;">
+  <b>Overlay toggles</b><br>
+  {'<label><input type="checkbox" id="chk_syn" checked onchange="toggleTraces()"> Synapses</label><br>' if syn_idx else ''}
+  {'<label><input type="checkbox" id="chk_mid" checked onchange="toggleTraces()"> Contact midpoints</label><br>' if mid_idx else ''}
+  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-5 centroids</label>' if cen_idx else ''}
+</div>
+{raw_html}
+<script>{checkbox_js}</script>
+</body></html>"""
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(full_html)
+    else:
+        fig.write_html(path)
     print(f"Saved wireframe overlap visualization: {path}")
 
 def build_synapses_only_html(valid_names, output_dir,

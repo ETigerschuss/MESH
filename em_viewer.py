@@ -192,11 +192,11 @@ def ensure_em_snapshots(results_dir: str, contacts: pd.DataFrame, synapses: pd.D
             if sid is not None:
                 mask = seg_up == sid
                 c = np.array(_hex_to_rgb(NEURON_COLORS.get(source_name, '#ff0000')), dtype=np.uint8)
-                img[mask] = (img[mask].astype(float) * 0.4 + c.astype(float) * 0.6).astype(np.uint8)
+                img[mask] = (img[mask].astype(float) * 0.65 + c.astype(float) * 0.35).astype(np.uint8)
             if tid is not None:
                 mask = seg_up == tid
                 c = np.array(_hex_to_rgb(NEURON_COLORS.get(target_name, '#00ff00')), dtype=np.uint8)
-                img[mask] = (img[mask].astype(float) * 0.4 + c.astype(float) * 0.6).astype(np.uint8)
+                img[mask] = (img[mask].astype(float) * 0.65 + c.astype(float) * 0.35).astype(np.uint8)
 
             Image.fromarray(img).save(out_path)
             return True
@@ -506,6 +506,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const traceInfo = {TRACE_INFO_JSON};
         const contactList = {CONTACT_LIST_JSON};
         const synapseList = {SYNAPSE_LIST_JSON};
+        const brainTraceIndices = {BRAIN_TRACE_INDICES_JSON};
         
         // DOM elements
         const plotDiv = document.getElementById('plotly3d');
@@ -594,6 +595,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             });
         });
         
+        // Brain areas toggle and opacity
+        (function() {
+            const brainCb = document.getElementById('brainToggle');
+            const brainSlider = document.getElementById('brainOpacity');
+            const brainVal = document.getElementById('brainOpacityVal');
+            if (brainCb && brainTraceIndices.length > 0) {
+                brainCb.addEventListener('change', function() {
+                    const vis = this.checked;
+                    brainSlider.disabled = !vis;
+                    Plotly.restyle(plotDiv, {'visible': vis}, brainTraceIndices);
+                });
+                if (brainSlider) {
+                    brainSlider.addEventListener('input', function() {
+                        const opacity = parseInt(this.value) / 100;
+                        if (brainVal) brainVal.textContent = opacity.toFixed(2);
+                        Plotly.restyle(plotDiv, {'opacity': opacity}, brainTraceIndices);
+                    });
+                }
+            }
+        })();
+        
         // Click handler for 3D plot
         plotDiv.on('plotly_click', function(data) {
             if (isUpdatingHighlight) return;
@@ -637,9 +659,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             currentList = getVisibleItems(kind);
             currentListIndex = currentList.indexOf(idx);
             
-            emTitle.textContent = `${kind.charAt(0).toUpperCase() + kind.slice(1)} #${idx}`;
-            emLocation.textContent = `${source} → ${target} at (${Math.round(x)}, ${Math.round(y)}, ${Math.round(z)})`;
-            itemInfo.textContent = `${kind.charAt(0).toUpperCase() + kind.slice(1)} ${currentListIndex + 1}/${currentList.length} (idx: ${idx})`;
+            emTitle.textContent = `${source} → ${target}`;
+            emLocation.textContent = `${kind.charAt(0).toUpperCase() + kind.slice(1)} #${idx} at (${Math.round(x)}, ${Math.round(y)}, ${Math.round(z)})`;
+            itemInfo.textContent = `${currentListIndex + 1}/${currentList.length}`;
             
             loadImage(kind, idx, 0);
             highlightPoint(kind, idx);
@@ -784,9 +806,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             zSlider.value = 0;
 
             const label = currentKind.charAt(0).toUpperCase() + currentKind.slice(1);
-            emTitle.textContent = `${label} #${newIdx}`;
-            emLocation.textContent = `${item.source} → ${item.target} at (${Math.round(item.x)}, ${Math.round(item.y)}, ${Math.round(item.z)})`;
-            itemInfo.textContent = `${label} ${newListIndex + 1}/${currentList.length} (idx: ${newIdx})`;
+            emTitle.textContent = `${item.source} → ${item.target}`;
+            emLocation.textContent = `${label} #${newIdx} at (${Math.round(item.x)}, ${Math.round(item.y)}, ${Math.round(item.z)})`;
+            itemInfo.textContent = `${newListIndex + 1}/${currentList.length}`;
 
             loadImage(currentKind, newIdx, 0);
             highlightPoint(currentKind, newIdx);
@@ -945,6 +967,55 @@ def load_mesh_pointcloud(neuron_name, mesh_dir, max_points=10000):
     return vertices[:, 0], vertices[:, 1], vertices[:, 2]
 
 
+def _load_brain_neuropil_traces():
+    """Load FlyWire brain neuropil meshes and return Plotly Mesh3d traces (hidden by default).
+    Uses fafbseg.flywire.get_neuropil_volumes for JFRC2 neuropils mapped to FAFB14.1 space.
+    Returns list of (trace, neuropil_name) tuples, or empty list on failure."""
+    try:
+        import fafbseg.flywire as fw
+    except ImportError:
+        print("[brain] fafbseg not installed, skipping brain neuropils")
+        return []
+
+    # Get list of available neuropils
+    try:
+        available = fw.get_neuropil_volumes(None)
+        if not available:
+            print("[brain] No neuropil volumes available")
+            return []
+        neuropil_names = sorted(available)
+    except Exception as e:
+        print(f"[brain] Could not list neuropils: {e}")
+        return []
+
+    print(f"[brain] Loading {len(neuropil_names)} neuropil volumes...")
+    traces = []
+    for name in neuropil_names:
+        try:
+            vol = fw.get_neuropil_volumes(name)
+            if vol is None or not hasattr(vol, 'vertices') or len(vol.vertices) == 0:
+                continue
+            verts = np.array(vol.vertices)
+            faces = np.array(vol.faces)
+            traces.append((go.Mesh3d(
+                x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+                i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                color='#888888',
+                opacity=0.08,
+                name=f'brain_{name}',
+                visible=False,
+                hoverinfo='name',
+                showlegend=False,
+                flatshading=True,
+                lighting=dict(ambient=0.8, diffuse=0.2),
+            ), name))
+        except Exception as e:
+            print(f"[brain] Failed to load {name}: {e}")
+            continue
+    print(f"[brain] Loaded {len(traces)} neuropil regions")
+    return traces
+
+
 def build_figure(mesh_dir):
     """Build the 3D Plotly figure with highlighting capability"""
     contacts = load_contacts(RESULTS_DIR)
@@ -1057,12 +1128,21 @@ def build_figure(mesh_dir):
                 mode='markers',
                 name=f'{neuron_name}_synapses_highlight',
                 visible=False,
-                marker=dict(size=15, color='yellow', opacity=1.0, symbol='diamond'),
+                marker=dict(size=12, color='yellow', opacity=1.0, symbol='circle'),
                 hovertemplate='SELECTED Synapse<extra></extra>',
                 legendgroup=neuron_name,
                 showlegend=False
             ))
             print(f"  {neuron_name}: {M} synapses")
+    
+    # Load brain neuropil meshes
+    brain_traces_info = []
+    brain_neuropils = _load_brain_neuropil_traces()
+    for brain_trace, np_name in brain_neuropils:
+        idx = len(traces)
+        trace_info[f"brain_{np_name}"] = idx
+        brain_traces_info.append(idx)
+        traces.append(brain_trace)
     
     fig = go.Figure(data=traces)
     fig.update_layout(
@@ -1078,7 +1158,7 @@ def build_figure(mesh_dir):
         height=800
     )
     
-    return fig, contacts, synapses, trace_info
+    return fig, contacts, synapses, trace_info, brain_traces_info
 
 
 def index_em_snapshots(em_snap_dir, contacts, synapses, z_range: int = 20):
@@ -1164,8 +1244,10 @@ def index_em_snapshots(em_snap_dir, contacts, synapses, z_range: int = 20):
     print(f"[snapshots] Indexed {n_center} synapse centers (embedded) + {n_zstack} Z-stack refs")
 
     return snapshot_map
-def generate_html(fig, contacts, synapses, trace_info, em_snap_dir):
+def generate_html(fig, contacts, synapses, trace_info, em_snap_dir, brain_trace_indices=None):
     """Generate improved HTML with integrated template"""
+    if brain_trace_indices is None:
+        brain_trace_indices = []
     snapshot_mapping = index_em_snapshots(em_snap_dir, contacts, synapses)
     
     plot_div = fig.to_html(
@@ -1191,6 +1273,22 @@ def generate_html(fig, contacts, synapses, trace_info, em_snap_dir):
     
     checkboxes_html = '\n'.join(neuron_checkboxes)
     
+    # Add brain areas controls if brain traces are available
+    if brain_trace_indices:
+        checkboxes_html += '''
+<div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #444;">
+  <h3 style="margin: 0 0 6px 0; font-size: 13px; color: #aaa;">Brain Areas</h3>
+  <label style="display:flex; align-items:center; gap:4px; font-size:11px; cursor:pointer;">
+    <input type="checkbox" id="brainToggle"> Show brain
+  </label>
+  <div style="margin-top:6px; font-size:11px;">
+    <label style="color:#999;">Opacity</label>
+    <input type="range" id="brainOpacity" min="0" max="40" value="8" step="1" 
+           style="width:100%; margin-top:2px;" disabled>
+    <span id="brainOpacityVal" style="color:#FFD400; font-size:10px;">0.08</span>
+  </div>
+</div>'''
+    
     # Prepare data for JavaScript
     snapshot_json = json.dumps(snapshot_mapping)
     neuron_names_json = json.dumps(neuron_list)
@@ -1203,6 +1301,7 @@ def generate_html(fig, contacts, synapses, trace_info, em_snap_dir):
     
     contact_list_json = json.dumps(contact_list)
     synapse_list_json = json.dumps(synapse_list)
+    brain_indices_json = json.dumps(brain_trace_indices)
     
     # Use integrated template
     html_content = HTML_TEMPLATE
@@ -1215,6 +1314,7 @@ def generate_html(fig, contacts, synapses, trace_info, em_snap_dir):
     html_content = html_content.replace('{TRACE_INFO_JSON}', trace_info_json)
     html_content = html_content.replace('{CONTACT_LIST_JSON}', contact_list_json)
     html_content = html_content.replace('{SYNAPSE_LIST_JSON}', synapse_list_json)
+    html_content = html_content.replace('{BRAIN_TRACE_INDICES_JSON}', brain_indices_json)
     
     return html_content
 
@@ -1228,10 +1328,10 @@ def main():
     em_snap_dir = os.path.join(RESULTS_DIR, 'em_snaps')
     
     print("\n[1/3] Building 3D figure with highlighting...")
-    fig, contacts, synapses, trace_info = build_figure(mesh_dir)
+    fig, contacts, synapses, trace_info, brain_indices = build_figure(mesh_dir)
     
     print("\n[2/3] Generating HTML viewer...")
-    html = generate_html(fig, contacts, synapses, trace_info, em_snap_dir)
+    html = generate_html(fig, contacts, synapses, trace_info, em_snap_dir, brain_trace_indices=brain_indices)
     
     print("\n[3/3] Writing output...")
     os.makedirs(RESULTS_DIR, exist_ok=True)
