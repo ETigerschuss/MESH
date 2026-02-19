@@ -101,11 +101,11 @@ def ensure_em_snapshots(results_dir: str, contacts: pd.DataFrame, synapses: pd.D
     # Count specifically missing center (z0) images — these are essential
     missing_centers = 0
     for _, row in contacts.iterrows():
-        if f"contact_{int(row['idx'])}.png" not in existing:
+        if f"contact_{int(row['idx'])}_segmented.png" not in existing:
             missing_centers += 1
     for _, row in synapses.iterrows():
         syn_col = 'idx' if 'idx' in synapses.columns else 'index'
-        if f"synapse_{int(row[syn_col])}.png" not in existing:
+        if f"synapse_{int(row[syn_col])}_segmented.png" not in existing:
             missing_centers += 1
 
     if missing_centers == 0 and len(existing) >= expected_with_zstack * 0.9:
@@ -144,9 +144,9 @@ def ensure_em_snapshots(results_dir: str, contacts: pd.DataFrame, synapses: pd.D
 
     def grab(center_nm, source_name, target_name, kind: str, idx: int, z_offset: int = 0):
         """Download one EM slice with segmentation overlay at z_offset from center."""
-        # Build output filename
+        # Build output filename (match generate_em_stacks.py naming)
         if z_offset == 0:
-            out_path = os.path.join(em_snap_dir, f"{kind}_{idx}.png")
+            out_path = os.path.join(em_snap_dir, f"{kind}_{idx}_segmented.png")
         else:
             sign = '+' if z_offset >= 0 else '-'
             out_path = os.path.join(em_snap_dir,
