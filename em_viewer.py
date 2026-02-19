@@ -91,15 +91,28 @@ def ensure_em_snapshots(results_dir: str, contacts: pd.DataFrame, synapses: pd.D
     em_snap_dir = os.path.join(results_dir, 'em_snaps')
     os.makedirs(em_snap_dir, exist_ok=True)
 
-    # Check if we already have z-stack images (not just center slices)
-    existing = [f for f in os.listdir(em_snap_dir) if f.endswith('.png')]
+    # Check which images are missing (center z0 + z-stack)
+    existing = set(f for f in os.listdir(em_snap_dir) if f.endswith('.png'))
     n_contacts = len(contacts)
     n_synapses = len(synapses)
     n_items = n_contacts + n_synapses
     expected_with_zstack = n_items * (2 * z_range + 1)  # center + ±z_range
-    if len(existing) >= expected_with_zstack * 0.9:  # 90% threshold
-        print(f"[snapshots] Found {len(existing)} images (expected ~{expected_with_zstack}), skipping download")
+
+    # Count specifically missing center (z0) images — these are essential
+    missing_centers = 0
+    for _, row in contacts.iterrows():
+        if f"contact_{int(row['idx'])}.png" not in existing:
+            missing_centers += 1
+    for _, row in synapses.iterrows():
+        syn_col = 'idx' if 'idx' in synapses.columns else 'index'
+        if f"synapse_{int(row[syn_col])}.png" not in existing:
+            missing_centers += 1
+
+    if missing_centers == 0 and len(existing) >= expected_with_zstack * 0.9:
+        print(f"[snapshots] Found {len(existing)} images (expected ~{expected_with_zstack}), all centers present — skipping download")
         return
+    elif missing_centers > 0:
+        print(f"[snapshots] Missing {missing_centers} center images — will download missing...")
     elif len(existing) > 0:
         print(f"[snapshots] Found {len(existing)} images but need ~{expected_with_zstack} for Z-stacks, downloading missing...")
 
@@ -192,11 +205,11 @@ def ensure_em_snapshots(results_dir: str, contacts: pd.DataFrame, synapses: pd.D
             if sid is not None:
                 mask = seg_up == sid
                 c = np.array(_hex_to_rgb(NEURON_COLORS.get(source_name, '#ff0000')), dtype=np.uint8)
-                img[mask] = (img[mask].astype(float) * 0.65 + c.astype(float) * 0.35).astype(np.uint8)
+                img[mask] = (img[mask].astype(float) * 0.5 + c.astype(float) * 0.5).astype(np.uint8)
             if tid is not None:
                 mask = seg_up == tid
                 c = np.array(_hex_to_rgb(NEURON_COLORS.get(target_name, '#00ff00')), dtype=np.uint8)
-                img[mask] = (img[mask].astype(float) * 0.65 + c.astype(float) * 0.35).astype(np.uint8)
+                img[mask] = (img[mask].astype(float) * 0.5 + c.astype(float) * 0.5).astype(np.uint8)
 
             Image.fromarray(img).save(out_path)
             return True
