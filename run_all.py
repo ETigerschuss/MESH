@@ -16,9 +16,31 @@ import os
 import sys
 import subprocess
 import time
+import json
 from datetime import datetime
+from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ── Auto-load FlyWire token from cave-secret.json if not already set ──
+def _ensure_flywire_token():
+    """Load FlyWire token into env so child processes inherit it."""
+    if os.environ.get("FLYWIRE_TOKEN"):
+        return  # already set
+    secret_path = Path.home() / ".cloudvolume" / "secrets" / "cave-secret.json"
+    if secret_path.is_file():
+        try:
+            data = json.loads(secret_path.read_text())
+            tok = data.get("token", "")
+            if tok:
+                os.environ["FLYWIRE_TOKEN"] = tok
+                print(f"  Token loaded from {secret_path}  ({tok[:8]}…)")
+                return
+        except Exception as e:
+            print(f"  ⚠ Could not read token from {secret_path}: {e}")
+    print("  ⚠ FLYWIRE_TOKEN not set and cave-secret.json not found!")
+    print("    Set env var FLYWIRE_TOKEN before running.")
+    sys.exit(1)
 
 SCRIPTS = [
     ("overlap_analysis.py",       "Overlap analysis + 3D figures + EM viewer"),
@@ -34,6 +56,8 @@ def main():
     print("  MESH Pipeline — Run All Scripts")
     print(f"  Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 72)
+
+    _ensure_flywire_token()
 
     results = []
     for i, (script, description) in enumerate(SCRIPTS, 1):
