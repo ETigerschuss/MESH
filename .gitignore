@@ -49,6 +49,17 @@ simple_mesh_*.py
 *.log
 *.bak
 ~$*
+*.txt
+
+# Debug and helper scripts (local dev only)
+_*.py
+check_*.py
+debug_*.py
+inspect_*.py
+verify_*.py
+analyze_overlap.py
+run_bips_update.py
+run_regen.py
 
 # Jupyter Notebooks checkpoints
 .ipynb_checkpoints/

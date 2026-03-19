@@ -5,6 +5,7 @@ Run this after overlap_analysis.py has completed to generate the 2D PNG plots.
 
 import os
 import sys
+import json
 import pandas as pd
 import numpy as np
 import trimesh
@@ -31,29 +32,11 @@ GEO_DATA_DIR = os.path.join(RESULTS_DIR, "geometric_data")
 MESH_DIR = os.path.join(RESULTS_DIR, "neuron_meshes")
 OUTPUT_DIR = os.path.join(RESULTS_DIR, "overlap_plots_skeleton")
 
-# Neuron IDs (restricted set + BIPS)
-neuron_ids = {
-    720575940618519710: 'MOT_L',
-    720575940630139386: 'MOT_R',
-    720575940622361270: 'MOS_L',
-    720575940622168052: 'MOS_R',
-    720575940626477498: 'VS1_L',
-    720575940619878961: 'VS1_R',
-    720575940640722851: 'VS2_L',
-    720575940613126835: 'VS2_R',
-    720575940622831740: 'VS3_L',
-    720575940641812699: 'VS3_R',
-    720575940624273919: 'VS4_L',
-    720575940659799937: 'VS4_R',
-    720575940628031249: 'HSN_L',
-    720575940615933919: 'HSN_R',
-    720575940629153020: 'HSE_L',
-    720575940629148007: 'HSE_R',
-    720575940622312965: 'HSS_L',
-    720575940628743496: 'HSS_R',
-    720575940623618708: 'BIPS_L',
-    720575940622581173: 'BIPS_R',
-}
+# Load neuron IDs from central config (neurons.json)
+_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
+with open(_cfg_path, 'r') as _nf:
+    _cfg = json.load(_nf)
+neuron_ids = {int(info['id']): name for name, info in _cfg['neurons'].items()}
 
 # Color map (MOS, VS, MOT, HS, BIPS)
 def get_color(name):
@@ -117,15 +100,15 @@ print(f"Loaded {len(neurons)}/{len(neuron_ids)} meshes")
 
 # Define scenarios
 scenarios = [
-    ("ALL", {"MOT", "MOS", "BIPS"}, {"HS", "VS", "BIPS"}, None),
-    ("MOT_only", {"MOT"}, {"HS", "VS", "BIPS"}, None),
-    ("MOS_only", {"MOS"}, {"HS", "VS", "BIPS"}, None),
-    ("ALL_L", {"MOT", "MOS", "BIPS"}, {"HS", "VS", "BIPS"}, "L"),
-    ("ALL_R", {"MOT", "MOS", "BIPS"}, {"HS", "VS", "BIPS"}, "R"),
-    ("MOT_only_L", {"MOT"}, {"HS", "VS", "BIPS"}, "L"),
-    ("MOT_only_R", {"MOT"}, {"HS", "VS", "BIPS"}, "R"),
-    ("MOS_only_L", {"MOS"}, {"HS", "VS", "BIPS"}, "L"),
-    ("MOS_only_R", {"MOS"}, {"HS", "VS", "BIPS"}, "R"),
+    ("ALL", {"MOT", "MOS"}, {"HS", "VS"}, None),
+    ("MOT_only", {"MOT"}, {"HS", "VS"}, None),
+    ("MOS_only", {"MOS"}, {"HS", "VS"}, None),
+    ("ALL_L", {"MOT", "MOS"}, {"HS", "VS"}, "L"),
+    ("ALL_R", {"MOT", "MOS"}, {"HS", "VS"}, "R"),
+    ("MOT_only_L", {"MOT"}, {"HS", "VS"}, "L"),
+    ("MOT_only_R", {"MOT"}, {"HS", "VS"}, "R"),
+    ("MOS_only_L", {"MOS"}, {"HS", "VS"}, "L"),
+    ("MOS_only_R", {"MOS"}, {"HS", "VS"}, "R"),
 ]
 
 # Process each scenario
@@ -172,13 +155,22 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
         neuron_faces = scenario_faces[scenario_faces['neuron_a'] == source_name]
         print(f"    Overlap faces: {len(neuron_faces)}")
         
-        # Extract overlap triangles
+        # Extract overlap triangles - detect degenerate ones (all 3 vertices identical)
         overlap_triangles = []
+        overlap_centroids = []  # fallback: scatter points for degenerate faces
         for _, row in neuron_faces.iterrows():
             v1 = [row['vertex1_x'], row['vertex1_y'], row['vertex1_z']]
             v2 = [row['vertex2_x'], row['vertex2_y'], row['vertex2_z']]
             v3 = [row['vertex3_x'], row['vertex3_y'], row['vertex3_z']]
-            overlap_triangles.append([v1, v2, v3])
+            # Check if triangle is degenerate (all vertices same or near-same)
+            if (np.allclose(v1, v2, atol=1.0) and np.allclose(v2, v3, atol=1.0)):
+                # Degenerate face from recycled data - use centroid
+                cx = row.get('centroid_x', v1[0])
+                cy = row.get('centroid_y', v1[1])
+                cz = row.get('centroid_z', v1[2])
+                overlap_centroids.append([cx, cy, cz])
+            else:
+                overlap_triangles.append([v1, v2, v3])
         
         # Get neuron mesh
         neuron_mesh = neurons[source_name]
@@ -204,7 +196,7 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
             fig, ax = navis.plot2d(
                 mesh_neuron_ds,
                 color=get_color(source_name),
-                alpha=1.0,
+                alpha=0.3,
                 view=navis_view,
                 method='2d',
                 radius=True,
@@ -220,20 +212,32 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
             for triangle in overlap_triangles:
                 projected = [[v[x_idx], v[y_idx]] for v in triangle]
                 overlap_triangles_2d.append(projected)
-            
-            # Add overlap surfaces
+
+            # Project degenerate centroids to 2D
+            centroid_xs = [c[x_idx] for c in overlap_centroids]
+            centroid_ys = [c[y_idx] for c in overlap_centroids]
+
+            # Add overlap surfaces (real triangles)
             if overlap_triangles_2d:
                 overlap_collection = PolyCollection(
                     overlap_triangles_2d,
-                    alpha=0.7,
-                    facecolors='red',
-                    edgecolors='darkred',
+                    alpha=1.0,
+                    facecolors='#FF0030',
+                    edgecolors='#CC0020',
                     linewidths=0.3,
                     zorder=100
                 )
                 ax.add_collection(overlap_collection)
-            
-            # Calculate axis limits
+
+            # Add overlap centroids as scatter points (degenerate/recycled faces)
+            if centroid_xs:
+                ax.scatter(centroid_xs, centroid_ys,
+                           c='#FF0030', s=30, alpha=1.0,
+                           edgecolors='#CC0020', linewidths=0.5,
+                           zorder=100, marker='o',
+                           )
+
+            overlap_label = f'{len(overlap_triangles)} faces + {len(overlap_centroids)} centroids'            # Calculate axis limits
             neuron_coords_x = neuron_mesh.vertices[:, x_idx]
             neuron_coords_y = neuron_mesh.vertices[:, y_idx]
             
@@ -250,14 +254,6 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
             ax.set_ylabel('Y (nm)' if y_idx == 1 else 'Z (nm)', fontsize=10)
             ax.grid(False)
             ax.set_facecolor('white')
-            
-            # Add legend
-            target_count = len(neuron_faces['neuron_b'].unique())
-            legend_elements = [
-                Patch(facecolor=get_color(source_name), alpha=1.0, label=source_name),
-                Patch(facecolor='red', alpha=0.7, label=f'Overlaps ({target_count} targets)')
-            ]
-            ax.legend(handles=legend_elements, loc='upper right', fontsize=9, framealpha=0.9)
             
             plt.tight_layout()
             

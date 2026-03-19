@@ -18,6 +18,12 @@ import subprocess
 import time
 import json
 from datetime import datetime
+
+# Ensure UTF-8 output even when redirected to a file on Windows
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -43,10 +49,10 @@ def _ensure_flywire_token():
     sys.exit(1)
 
 SCRIPTS = [
-    ("overlap_analysis.py",       "Overlap analysis + 3D figures + EM viewer"),
+    ("overlap_analysis.py",        "Overlap analysis + 3D figures"),
     ("generate_skeleton_plots.py", "Skeleton plots"),
-    ("skeleton_em_viewer.py",      "Skeleton EM viewer"),
-    ("generate_em_stacks.py",      "EM stack montages"),
+    ("generate_em_stacks.py",      "EM stack montages (contacts + synapses + overlaps)"),
+    ("skeleton_em_viewer.py",      "Final comprehensive EM viewer (runs last)"),
 ]
 
 
@@ -77,13 +83,9 @@ def main():
             proc = subprocess.run(
                 [sys.executable, script_path],
                 cwd=SCRIPT_DIR,
-                timeout=14400,  # 4-hour timeout
             )
             elapsed = time.time() - t0
             status = "OK" if proc.returncode == 0 else f"FAIL (exit {proc.returncode})"
-        except subprocess.TimeoutExpired:
-            elapsed = time.time() - t0
-            status = "TIMEOUT"
         except Exception as e:
             elapsed = time.time() - t0
             status = f"ERROR: {e}"

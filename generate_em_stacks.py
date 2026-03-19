@@ -1,410 +1,519 @@
 """
-Generate ALL EM snapshots with segmentation - Complete Clean Download
-- All 240 contact patches (center + 41 Z-stack images each)
-- All 67 synapses (center + 41 Z-stack images each)
-- Consistent resolution (512x512 pixels)
-- Consistent Z-range (-20 to +20, 41 images)
-- All with colored segmentation overlays
+Generate ALL EM snapshots with segmentation overlays
+====================================================
+- Overlap faces  → spatially clustered (each cluster = separate overlap idx)
+- Contact patches (Top1-Top6 per pair, ±20 Z-stack)
+- Synapses (±20 Z-stack)
+- Writes overlap_em_meta.json consumed by skeleton_em_viewer.py
+
+Uses neurons.json for neuron IDs and colors (no hardcoded lists).
 """
 
 import os
+import json
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
+from scipy.cluster.hierarchy import linkage, fcluster
 from tqdm import tqdm
 
 try:
     from cloudvolume import CloudVolume
-    HAVE_CLOUDVOLUME = True
 except ImportError:
     print("[ERROR] CloudVolume not available. Install with: pip install cloud-volume")
-    HAVE_CLOUDVOLUME = False
     exit(1)
 
-# Neuron IDs and colors
-NEURON_IDS = {
-    720575940618519710: 'MOT_L', 720575940630139386: 'MOT_R',
-    720575940622361270: 'MOS_L', 720575940622168052: 'MOS_R',
-    720575940626477498: 'VS1_L', 720575940619878961: 'VS1_R',
-    720575940640722851: 'VS2_L', 720575940613126835: 'VS2_R',
-    720575940622831740: 'VS3_L', 720575940641812699: 'VS3_R',
-    720575940624273919: 'VS4_L', 720575940659799937: 'VS4_R',
-    720575940626457406: 'VS5_L', 720575940639151694: 'VS5_R',
-    720575940647311651: 'VS6_L', 720575940626928521: 'VS6_R',
-    720575940624931564: 'VS7_L', 720575940618681709: 'VS7_R',
-    720575940633923298: 'VS8_L', 720575940636972400: 'VS8_R',
-    720575940628031249: 'HSN_L', 720575940615933919: 'HSN_R',
-    720575940629153020: 'HSE_L', 720575940629148007: 'HSE_R',
-    720575940622312965: 'HSS_L', 720575940628743496: 'HSS_R',
-}
 
-# Color scheme based on cell types with nuances
-# MOS (Ocellar) = #4D9221 (green)
-# VS (Visual System) = #D14900 (deep orange)
-# MOT (Motor) = #5E3C99 (purple)
-# HS (Horizontal System) = #C51B7D (magenta/pink)
+# ─── Configuration ────────────────────────────────────────────────────
 
-NEURON_COLORS = {
-    # Motor Neurons - Purple #5E3C99 with nuances
-    'MOT_L': (94, 60, 153),        # Base purple
-    'MOT_R': (124, 90, 183),       # Lighter purple
-    'MOS_L': (77, 146, 33),        # MOS green base
-    'MOS_R': (97, 166, 53),        # MOS green lighter
-    
-    # Visual System (VS) - Deep orange #D14900 with nuances
-    'VS1_L': (209, 73, 0),         # Base orange
-    'VS1_R': (229, 103, 30),       # Lighter
-    'VS2_L': (189, 53, 0),         # Darker
-    'VS2_R': (219, 83, 10),        # Medium
-    'VS3_L': (199, 63, 0),         # Slightly darker
-    'VS3_R': (224, 93, 20),        # Slightly lighter
-    'VS4_L': (179, 43, 0),         # More saturated dark
-    'VS4_R': (234, 113, 40),       # More saturated light
-    'VS5_L': (204, 68, 0),         # Shifted darker
-    'VS5_R': (229, 98, 25),        # Shifted lighter
-    'VS6_L': (194, 58, 0),         # Variation 1
-    'VS6_R': (224, 88, 15),        # Variation 1 light
-    'VS7_L': (184, 48, 0),         # Variation 2
-    'VS7_R': (219, 78, 5),         # Variation 2 light
-    'VS8_L': (209, 73, 0),         # Variation 3
-    'VS8_R': (234, 103, 30),       # Variation 3 light
-    
-    # Horizontal System (HS) - Magenta #C51B7D with nuances
-    'HSN_L': (197, 27, 125),       # Base magenta
-    'HSN_R': (217, 57, 155),       # Lighter
-    'HSE_L': (177, 7, 105),        # Darker
-    'HSE_R': (207, 37, 135),       # Medium
-    'HSS_L': (187, 17, 115),       # Variation 1
-    'HSS_R': (217, 47, 145),       # Variation 1 light
-}
+def load_config():
+    """Load neuron IDs, names, colors from neurons.json."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    nf = os.path.join(base, 'neurons.json')
+    with open(nf, 'r') as f:
+        cfg = json.load(f)
+
+    neuron_ids = {}   # flyid -> name
+    neuron_colors = {}  # name -> (r, g, b)
+    for name, info in cfg['neurons'].items():
+        fid = info['id']
+        neuron_ids[fid] = name
+        neuron_colors[name] = tuple(info['color_rgb'])
+    return neuron_ids, neuron_colors
 
 
-def create_segmented_snapshot(em_vol, seg_vol, center_nm, source_id, target_id, 
-                              source_name, target_name, z_offset_slices=0, size_pixels=512):
-    """
-    Create EM snapshot with colored neuron segmentation overlay
-    PROVEN WORKING VERSION - using exact code from create_segmented_em_snapshots.py
-    """
-    # Convert nm to voxel coordinates using each volume's resolution
-    em_center_vox = np.array(center_nm) / np.array(em_vol.resolution)
-    seg_center_vox = np.array(center_nm) / np.array(seg_vol.resolution)
-    
-    # Account for resolution difference: EM is 8nm/voxel, Seg is 16nm/voxel (2x larger)
-    resolution_ratio = seg_vol.resolution[0] / em_vol.resolution[0]  # = 2.0
-    
-    em_half_size = size_pixels // 2
-    seg_half_size = int(em_half_size / resolution_ratio)  # = 256 / 2 = 128
-    
-    # EM patch bounds
-    em_x_start = int(em_center_vox[0] - em_half_size)
-    em_x_end = int(em_center_vox[0] + em_half_size)
-    em_y_start = int(em_center_vox[1] - em_half_size)
-    em_y_end = int(em_center_vox[1] + em_half_size)
-    em_z = int(em_center_vox[2])
-    
-    # Segmentation patch bounds
-    seg_x_start = int(seg_center_vox[0] - seg_half_size)
-    seg_x_end = int(seg_center_vox[0] + seg_half_size)
-    seg_y_start = int(seg_center_vox[1] - seg_half_size)
-    seg_y_end = int(seg_center_vox[1] + seg_half_size)
-    seg_z = int(seg_center_vox[2])
-    
-    # Apply Z-offset if provided
-    seg_z += z_offset_slices
-    em_z += z_offset_slices
-    
-    try:
-        # Fetch EM and segmentation at the SAME Z-offset
-        em_data = em_vol[em_x_start:em_x_end, em_y_start:em_y_end, em_z:em_z+1]
-        em_slice = em_data[:, :, 0, 0]
-        
-        seg_data = seg_vol[seg_x_start:seg_x_end, seg_y_start:seg_y_end, seg_z:seg_z+1]
-        seg_slice = seg_data[:, :, 0, 0]
-        
-        # Create RGB image from grayscale EM
-        em_rgb = np.stack([em_slice, em_slice, em_slice], axis=-1)
-        
-        # Color the source and target neurons
-        overlay_small = np.zeros((seg_slice.shape[0], seg_slice.shape[1], 3), dtype=np.uint8)
-        alpha_mask_small = np.zeros(seg_slice.shape, dtype=np.float32)
-        
-        neurons_to_color = {
-            source_id: source_name,
-            target_id: target_name
-        }
-        
-        for neuron_id, neuron_name in neurons_to_color.items():
-            color = NEURON_COLORS.get(neuron_name, (255, 255, 255))
-            mask_small = (seg_slice == neuron_id)
-            overlay_small[mask_small] = color
-            alpha_mask_small[mask_small] = 0.5
-        
-        # Resize the colored overlay and alpha mask to match EM size
-        if seg_slice.shape != em_slice.shape:
-            zoom_factors = (em_slice.shape[0] / seg_slice.shape[0], 
-                           em_slice.shape[1] / seg_slice.shape[1])
-            overlay = np.zeros_like(em_rgb, dtype=np.uint8)
-            for c in range(3):
-                overlay[:,:,c] = ndimage.zoom(overlay_small[:,:,c], zoom_factors, order=0)
-            alpha_mask = ndimage.zoom(alpha_mask_small, zoom_factors, order=0)
-        else:
-            overlay = overlay_small
-            alpha_mask = alpha_mask_small
-        
-        # Blend EM and overlay
-        alpha_3d = np.stack([alpha_mask, alpha_mask, alpha_mask], axis=-1)
-        blended = (em_rgb * (1 - alpha_3d) + overlay * alpha_3d).astype(np.uint8)
-        
-        # Convert to PIL Image
-        img = Image.fromarray(blended)
-        
-        # Add labels
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", 16)
-        except:
-            font = ImageFont.load_default()
-        
-        label = f"{source_name} → {target_name}"
-        draw.text((10, 10), label, fill=(255, 255, 255), font=font)
-        
-        if z_offset_slices != 0:
-            z_label = f"Z: {z_offset_slices:+d} ({z_offset_slices * 40:+d}nm)"
-            draw.text((10, 30), z_label, fill=(255, 255, 0), font=font)
-        
-        return img
-        
-    except Exception as e:
-        print(f"    [ERROR] {e}")
-        return None
-
-
-def main():
-    # Auto-detect latest results directory
+def resolve_results_dir():
+    """Find the latest comprehensive_overlap_results_* directory."""
     base = os.path.dirname(os.path.abspath(__file__))
     candidates = [d for d in os.listdir(base)
                   if os.path.isdir(os.path.join(base, d))
                   and d.startswith('comprehensive_overlap_results_')]
     if candidates:
-        results_dir = sorted(candidates)[-1]
-    else:
-        results_dir = 'comprehensive_overlap_results'
-    results_dir = os.environ.get('MESH_RESULTS_DIR', results_dir)
+        return os.path.join(base, sorted(candidates)[-1])
+    return os.path.join(base, 'comprehensive_overlap_results')
+
+
+# ─── EM Snapshot Creator ─────────────────────────────────────────────
+
+def create_segmented_snapshot(em_vol, seg_vol, center_nm,
+                              source_id, target_id,
+                              source_name, target_name,
+                              neuron_colors,
+                              z_offset_slices=0, size_pixels=512):
+    """
+    Create EM snapshot with coloured neuron segmentation overlay.
+    Returns PIL Image or None on error.
+    """
+    em_center_vox = np.array(center_nm) / np.array(em_vol.resolution)
+    seg_center_vox = np.array(center_nm) / np.array(seg_vol.resolution)
+
+    resolution_ratio = seg_vol.resolution[0] / em_vol.resolution[0]  # typically 2.0
+
+    em_half = size_pixels // 2
+    seg_half = int(em_half / resolution_ratio)
+
+    em_x0 = int(em_center_vox[0] - em_half)
+    em_x1 = int(em_center_vox[0] + em_half)
+    em_y0 = int(em_center_vox[1] - em_half)
+    em_y1 = int(em_center_vox[1] + em_half)
+    em_z  = int(em_center_vox[2]) + z_offset_slices
+
+    seg_x0 = int(seg_center_vox[0] - seg_half)
+    seg_x1 = int(seg_center_vox[0] + seg_half)
+    seg_y0 = int(seg_center_vox[1] - seg_half)
+    seg_y1 = int(seg_center_vox[1] + seg_half)
+    seg_z  = int(seg_center_vox[2]) + z_offset_slices
+
+    try:
+        em_data = em_vol[em_x0:em_x1, em_y0:em_y1, em_z:em_z+1]
+        em_slice = em_data[:, :, 0, 0]
+
+        seg_data = seg_vol[seg_x0:seg_x1, seg_y0:seg_y1, seg_z:seg_z+1]
+        seg_slice = seg_data[:, :, 0, 0]
+
+        em_rgb = np.stack([em_slice, em_slice, em_slice], axis=-1)
+
+        overlay_sm = np.zeros((*seg_slice.shape, 3), dtype=np.uint8)
+        alpha_sm   = np.zeros(seg_slice.shape, dtype=np.float32)
+
+        for nid, nname in [(source_id, source_name), (target_id, target_name)]:
+            colour = neuron_colors.get(nname, (255, 255, 255))
+            mask = (seg_slice == nid)
+            overlay_sm[mask] = colour
+            alpha_sm[mask] = 0.5
+
+        if seg_slice.shape != em_slice.shape:
+            zf = (em_slice.shape[0] / seg_slice.shape[0],
+                  em_slice.shape[1] / seg_slice.shape[1])
+            overlay = np.zeros_like(em_rgb, dtype=np.uint8)
+            for c in range(3):
+                overlay[:, :, c] = ndimage.zoom(overlay_sm[:, :, c], zf, order=0)
+            alpha_mask = ndimage.zoom(alpha_sm, zf, order=0)
+        else:
+            overlay = overlay_sm
+            alpha_mask = alpha_sm
+
+        a3 = np.stack([alpha_mask]*3, axis=-1)
+        blended = (em_rgb * (1 - a3) + overlay * a3).astype(np.uint8)
+
+        img = Image.fromarray(blended)
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("arial.ttf", 16)
+        except Exception:
+            font = ImageFont.load_default()
+
+        draw.text((10, 10), f"{source_name} \u2192 {target_name}",
+                  fill=(255, 255, 255), font=font)
+        if z_offset_slices != 0:
+            draw.text((10, 30),
+                      f"Z: {z_offset_slices:+d} ({z_offset_slices*40:+d}nm)",
+                      fill=(255, 255, 0), font=font)
+        return img
+
+    except Exception as e:
+        print(f"    [ERROR] snapshot: {e}")
+        return None
+
+
+# ─── Spatial Clustering for Overlap Faces ────────────────────────────
+
+CLUSTER_THRESHOLD_NM = 10_000  # 10 µm — faces farther apart form new cluster
+
+
+def build_overlap_plan(results_dir, neuron_ids):
+    """
+    Read contact_faces.csv, spatially cluster each pair's faces,
+    and return a list of *sub-cluster* overlap entries.
+
+    Returns list of dicts, each with:
+        idx, source, target, source_id, target_id,
+        faces  (DataFrame slice),
+        centroid_xyz,
+        z_lo, z_hi,
+        slice_detail [{z_offset, cx, cy, n_faces, area_um2}, ...]
+    """
+    csv_path = os.path.join(results_dir, 'geometric_data', 'contact_faces.csv')
+    if not os.path.exists(csv_path):
+        print(f"[ERROR] contact_faces.csv not found at {csv_path}")
+        return []
+
+    df = pd.read_csv(csv_path)
+    print(f"[overlap plan] {len(df)} total faces across "
+          f"{df.groupby(['neuron_a','neuron_b']).ngroups} directed pairs")
+
+    # Reverse lookup: name → flyid
+    name2id = {v: k for k, v in neuron_ids.items()}
+
+    # Deduplicate: merge both directions (A→B, B→A) into one undirected pair
+    # Use sorted pair key so each undirected pair is processed once
+    df['pair_key'] = df.apply(
+        lambda r: tuple(sorted([r['neuron_a'], r['neuron_b']])), axis=1)
+
+    plan = []
+    idx_counter = 0
+
+    for pair_key, grp in df.groupby('pair_key'):
+        na, nb = pair_key  # alphabetically sorted
+        centroids = grp[['centroid_x', 'centroid_y', 'centroid_z']].values
+
+        # --- Spatial clustering ---
+        if len(centroids) > 1:
+            Z = linkage(centroids, method='single')
+            labels = fcluster(Z, t=CLUSTER_THRESHOLD_NM, criterion='distance')
+        else:
+            labels = np.array([1])
+
+        n_clusters = int(labels.max())
+
+        for cl in range(1, n_clusters + 1):
+            mask = labels == cl
+            cl_faces = grp[mask].copy()
+
+            cx = cl_faces['centroid_x'].values
+            cy = cl_faces['centroid_y'].values
+            cz = cl_faces['centroid_z'].values
+
+            # Z in nm → z-slice offset: round(z / 40)
+            z_slices = np.round(cz / 40).astype(int)
+            z_lo = int(z_slices.min())
+            z_hi = int(z_slices.max())
+
+            # Per-z-slice detail (used for EM centroids per slice)
+            slice_detail = []
+            for z_off in range(z_lo, z_hi + 1):
+                zmask = z_slices == z_off
+                if zmask.sum() == 0:
+                    continue
+                slice_detail.append({
+                    'z_offset': int(z_off),
+                    'cx': float(cx[zmask].mean()),
+                    'cy': float(cy[zmask].mean()),
+                    'n_faces': int(zmask.sum()),
+                    'area_um2': float(cl_faces['face_area_um2'].values[zmask].sum()),
+                })
+
+            global_cx = float(cx.mean())
+            global_cy = float(cy.mean())
+            global_cz = float(cz.mean())
+
+            plan.append({
+                'idx': idx_counter,
+                'source': na,
+                'target': nb,
+                'source_id': name2id.get(na),
+                'target_id': name2id.get(nb),
+                'x': global_cx,
+                'y': global_cy,
+                'z': global_cz,
+                'z_lo': z_lo,
+                'z_hi': z_hi,
+                'n_slices': len(slice_detail),
+                'total_faces': int(mask.sum()),
+                'total_area_um2': float(cl_faces['face_area_um2'].sum()),
+                'slice_detail': slice_detail,
+                'cluster_label': cl,
+                'n_clusters_in_pair': n_clusters,
+            })
+            idx_counter += 1
+
+    n_undirected = df['pair_key'].nunique()
+    print(f"[overlap plan] {idx_counter} sub-clusters "
+          f"(from {n_undirected} undirected pairs)")
+    return plan
+
+
+# ─── Main ────────────────────────────────────────────────────────────
+
+def main():
+    neuron_ids, neuron_colors = load_config()
+    results_dir = resolve_results_dir()
     em_snap_dir = os.path.join(results_dir, 'em_snaps')
     os.makedirs(em_snap_dir, exist_ok=True)
-    
-    print("="*70)
-    print("Generate ALL EM Snapshots - Complete Clean Download")
-    print("="*70)
-    
-    # Initialize CloudVolume connections
-    print("\n[1/5] Connecting to data sources...")
-    em_vol = CloudVolume('https://bossdb-open-data.s3.amazonaws.com/flywire/fafbv14', 
-                         mip=1, use_https=True, progress=False)
-    seg_vol = CloudVolume('precomputed://gs://flywire_v141_m783', 
-                          mip=0, use_https=True, progress=False)
+
+    print("=" * 70)
+    print("Generate EM Snapshots – Overlaps (clustered) + Contacts + Synapses")
+    print("=" * 70)
+
+    # ── Connect to CloudVolume ──────────────────────────────────
+    print("\n[1/6] Connecting to data sources ...")
+    em_vol = CloudVolume(
+        'https://bossdb-open-data.s3.amazonaws.com/flywire/fafbv14',
+        mip=1, use_https=True, progress=False)
+    seg_vol = CloudVolume(
+        'precomputed://gs://flywire_v141_m783',
+        mip=0, use_https=True, progress=False)
     print("  [OK] Connected to EM and segmentation volumes")
-    
-    # ========== PROCESS CONTACTS ==========
-    print("\n[2/5] Loading contact data...")
+
+    # ════════════════════════════════════════════════════════════
+    # A.  OVERLAP FACES  (spatially clustered)
+    # ════════════════════════════════════════════════════════════
+    print("\n[2/6] Building spatially-clustered overlap plan ...")
+    plan = build_overlap_plan(results_dir, neuron_ids)
+
+    if plan:
+        total_overlap_imgs = sum(p['n_slices'] for p in plan)
+        print(f"  Will generate up to {total_overlap_imgs} overlap images "
+              f"({len(plan)} sub-clusters)")
+
+        # Remove old overlap images (indices changed due to clustering)
+        old_ov_files = [f for f in os.listdir(em_snap_dir)
+                        if f.startswith('overlap_')]
+        if old_ov_files:
+            print(f"  Removing {len(old_ov_files)} old overlap images ...")
+            for f in old_ov_files:
+                os.remove(os.path.join(em_snap_dir, f))
+
+        print("\n[3/6] Downloading overlap EM snapshots ...")
+        overlap_ok = 0
+        overlap_new = 0
+        overlap_skip = 0
+
+        for entry in tqdm(plan, desc="Overlap clusters"):
+            idx = entry['idx']
+            src_id = entry['source_id']
+            tgt_id = entry['target_id']
+            src_name = entry['source']
+            tgt_name = entry['target']
+
+            if src_id is None or tgt_id is None:
+                print(f"  [WARN] No fly-ID for {src_name}/{tgt_name}, skipping")
+                continue
+
+            for sd in entry['slice_detail']:
+                z_off = sd['z_offset']
+                center_nm = (sd['cx'], sd['cy'], z_off * 40)
+
+                # File naming
+                if z_off == entry['z_lo']:
+                    # treat the first slice as "center" (segmented)
+                    fname_center = f"overlap_{idx}_segmented.png"
+                    opath_c = os.path.join(em_snap_dir, fname_center)
+                    if not os.path.exists(opath_c):
+                        img = create_segmented_snapshot(
+                            em_vol, seg_vol, center_nm,
+                            src_id, tgt_id, src_name, tgt_name,
+                            neuron_colors, z_offset_slices=0,
+                            size_pixels=512)
+                        if img is not None:
+                            img.save(opath_c, 'PNG')
+                            overlap_new += 1
+                    else:
+                        overlap_skip += 1
+
+                # Z-offset file (relative to cluster z_lo)
+                rel_z = z_off - entry['z_lo']
+                sign = '+' if rel_z >= 0 else '-'
+                fname = f"overlap_{idx}_z{sign}{abs(rel_z):03d}.png"
+                opath = os.path.join(em_snap_dir, fname)
+
+                if os.path.exists(opath):
+                    overlap_skip += 1
+                    continue
+
+                img = create_segmented_snapshot(
+                    em_vol, seg_vol, center_nm,
+                    src_id, tgt_id, src_name, tgt_name,
+                    neuron_colors, z_offset_slices=0,
+                    size_pixels=512)
+                if img is not None:
+                    img.save(opath, 'PNG')
+                    overlap_new += 1
+
+            overlap_ok += 1
+
+        print(f"\n  [OK] Overlaps: {overlap_ok}/{len(plan)} clusters, "
+              f"{overlap_new} new + {overlap_skip} skipped")
+
+        # Write overlap_em_meta.json
+        meta_path = os.path.join(results_dir, 'overlap_em_meta.json')
+        meta_out = []
+        for entry in plan:
+            # Convert slice_detail z_offsets to relative (z_lo-based)
+            rel_slices = []
+            for sd in entry['slice_detail']:
+                rel_z = sd['z_offset'] - entry['z_lo']
+                rel_slices.append({
+                    'z_offset': rel_z,
+                    'cx': sd['cx'],
+                    'cy': sd['cy'],
+                    'n_faces': sd['n_faces'],
+                    'area_um2': sd['area_um2'],
+                })
+
+            meta_out.append({
+                'idx': entry['idx'],
+                'source': entry['source'],
+                'target': entry['target'],
+                'x': entry['x'],
+                'y': entry['y'],
+                'z': entry['z'],
+                'z_lo': 0,
+                'z_hi': entry['z_hi'] - entry['z_lo'],
+                'n_slices': entry['n_slices'],
+                'total_faces': entry['total_faces'],
+                'total_area_um2': entry['total_area_um2'],
+                'cluster_label': entry['cluster_label'],
+                'n_clusters_in_pair': entry['n_clusters_in_pair'],
+                'slice_detail': rel_slices,
+            })
+
+        with open(meta_path, 'w') as f:
+            json.dump(meta_out, f, indent=2)
+        print(f"  [OK] Wrote {meta_path}  ({len(meta_out)} entries)")
+    else:
+        print("  [WARN] No overlap plan – skipping overlap EM snapshots")
+
+    # ════════════════════════════════════════════════════════════
+    # B.  CONTACT PATCHES  (Top1–Top6 per pair, ±20 Z-stack)
+    # ════════════════════════════════════════════════════════════
+    print("\n[4/6] Loading contact patch data ...")
     contacts_file = os.path.join(results_dir, 'all_results_combined.csv')
-    
     if not os.path.exists(contacts_file):
-        print(f"[ERROR] File not found: {contacts_file}")
-        return
-    
-    df = pd.read_csv(contacts_file)
-    df = df[df['Has_Contact'] == True]
-    
-    print(f"  Found {len(df)} contact pairs")
-    
-    # Expand all patches (Top1-Top6)
-    print("\n[3/5] Processing ALL contact patches...")
-    
-    all_patches = []
-    patch_idx = 0
-    
-    for _, row in df.iterrows():
-        source_name = row['Source_Neuron']
-        target_name = row['Target_Neuron']
-        
-        # Get neuron IDs
-        source_id = None
-        target_id = None
-        for fid, fname in NEURON_IDS.items():
-            if fname == source_name:
-                source_id = fid
-            if fname == target_name:
-                target_id = fid
-        
-        if source_id is None or target_id is None:
-            continue
-        
-        # Process each Top patch (Top1-Top6)
-        for patch_num in range(1, 7):
-            x_col = f'Top{patch_num}_Patch_Centroid_X'
-            y_col = f'Top{patch_num}_Patch_Centroid_Y'
-            z_col = f'Top{patch_num}_Patch_Centroid_Z'
-            
-            if all(col in df.columns for col in [x_col, y_col, z_col]):
-                if not pd.isna(row[x_col]):
-                    patch_center = (row[x_col], row[y_col], row[z_col])
+        print(f"  [SKIP] {contacts_file} not found")
+    else:
+        cdf = pd.read_csv(contacts_file)
+        cdf = cdf[cdf['Has_Contact'] == True]
+        print(f"  Found {len(cdf)} contact pairs")
+
+        # Reverse lookup name → flyid
+        name2id = {v: k for k, v in neuron_ids.items()}
+
+        all_patches = []
+        patch_idx = 0
+        for _, row in cdf.iterrows():
+            sn = row['Source_Neuron']
+            tn = row['Target_Neuron']
+            sid = name2id.get(sn)
+            tid = name2id.get(tn)
+            if sid is None or tid is None:
+                continue
+            for pn in range(1, 7):
+                xcol = f'Top{pn}_Patch_Centroid_X'
+                if xcol in cdf.columns and not pd.isna(row.get(xcol)):
                     all_patches.append({
                         'idx': patch_idx,
-                        'source_name': source_name,
-                        'target_name': target_name,
-                        'source_id': source_id,
-                        'target_id': target_id,
-                        'center': patch_center,
-                        'patch_num': patch_num
+                        'source_name': sn, 'target_name': tn,
+                        'source_id': sid, 'target_id': tid,
+                        'center': (row[xcol],
+                                   row[f'Top{pn}_Patch_Centroid_Y'],
+                                   row[f'Top{pn}_Patch_Centroid_Z']),
+                        'patch_num': pn,
                     })
                     patch_idx += 1
-    
-    print(f"  Total contact patches: {len(all_patches)}")
-    print(f"  Will generate {len(all_patches)} center + {len(all_patches) * 41} Z-stack = {len(all_patches) * 42} images")
-    
-    # Generate contact snapshots with Z-stacks
-    contact_success = 0
-    total_contact_images = 0
-    skipped_contact_images = 0
-    
-    for patch in tqdm(all_patches, desc="Contacts (center + Z-stacks)"):
-        idx = patch['idx']
-        
-        # Generate Z-stack: -20 to +20 (41 images)
-        for z_offset in range(-20, 21):
-            # Determine output path
-            if z_offset == 0:
-                # Center slice - save as _segmented
-                output_path = os.path.join(em_snap_dir, f"contact_{idx}_segmented.png")
-            else:
-                # Z-stack slice
-                z_str = f"z{z_offset:+04d}"
-                output_path = os.path.join(em_snap_dir, f"contact_{idx}_{z_str}.png")
-            
-            # Skip if already exists
-            if os.path.exists(output_path):
-                skipped_contact_images += 1
-                continue
-            
-            img = create_segmented_snapshot(
-                em_vol, seg_vol,
-                patch['center'],
-                patch['source_id'], patch['target_id'],
-                patch['source_name'], patch['target_name'],
-                z_offset_slices=z_offset,
-                size_pixels=512
-            )
-            
-            if img is not None:
-                img.save(output_path, 'PNG')
-                total_contact_images += 1
-        
-        contact_success += 1
-    
-    print(f"\n  [OK] Contacts: {contact_success}/{len(all_patches)} patches, {total_contact_images} new + {skipped_contact_images} skipped")
-    
-    # ========== PROCESS SYNAPSES ==========
-    print("\n[4/5] Loading synapse data...")
-    synapses_file = os.path.join(results_dir, 'synapses.csv')
-    
-    if not os.path.exists(synapses_file):
-        print(f"[ERROR] File not found: {synapses_file}")
-        return
-    
-    syn_df = pd.read_csv(synapses_file)
-    syn_df = syn_df.dropna(subset=['x', 'y', 'z'])
-    
-    # Filter for MOT/MOS synapses (same approach as working script)
-    mot_mos_neurons = ['MOT_L', 'MOT_R', 'MOS_L', 'MOS_R']
-    
-    # Handle both pre_type/post_type and pre/post column names
-    if 'pre_type' in syn_df.columns and 'post_type' in syn_df.columns:
-        syn_df['source'] = syn_df['pre_type']
-        syn_df['target'] = syn_df['post_type']
-    elif 'pre' in syn_df.columns and 'post' in syn_df.columns:
-        syn_df['source'] = syn_df['pre']
-        syn_df['target'] = syn_df['post']
+
+        print(f"  Total contact patches: {len(all_patches)} "
+              f"→ {len(all_patches)*41} Z-stack images")
+
+        print("\n[5/6] Downloading contact EM snapshots ...")
+        c_new = c_skip = 0
+        for patch in tqdm(all_patches, desc="Contacts"):
+            pidx = patch['idx']
+            for z_off in range(-20, 21):
+                if z_off == 0:
+                    fname = f"contact_{pidx}_segmented.png"
+                else:
+                    fname = f"contact_{pidx}_z{z_off:+04d}.png"
+                opath = os.path.join(em_snap_dir, fname)
+                if os.path.exists(opath):
+                    c_skip += 1
+                    continue
+                img = create_segmented_snapshot(
+                    em_vol, seg_vol, patch['center'],
+                    patch['source_id'], patch['target_id'],
+                    patch['source_name'], patch['target_name'],
+                    neuron_colors, z_offset_slices=z_off,
+                    size_pixels=512)
+                if img is not None:
+                    img.save(opath, 'PNG')
+                    c_new += 1
+        print(f"  [OK] Contacts: {c_new} new + {c_skip} skipped")
+
+    # ════════════════════════════════════════════════════════════
+    # C.  SYNAPSES  (±20 Z-stack per synapse)
+    # ════════════════════════════════════════════════════════════
+    print("\n[6/6] Loading synapse data ...")
+    syn_file = os.path.join(results_dir, 'synapses.csv')
+    if not os.path.exists(syn_file):
+        print(f"  [SKIP] {syn_file} not found")
     else:
-        print(f"[ERROR] Could not find source/target columns in synapses.csv")
-        return
-    
-    mot_mos = syn_df[
-        syn_df['source'].isin(mot_mos_neurons) | 
-        syn_df['target'].isin(mot_mos_neurons)
-    ]
-    
-    print(f"  Found {len(mot_mos)} MOT/MOS synapses")
-    print(f"  Will generate {len(mot_mos)} center + {len(mot_mos) * 41} Z-stack = {len(mot_mos) * 42} images")
-    
-    # Generate synapse snapshots with Z-stacks
-    synapse_success = 0
-    total_synapse_images = 0
-    skipped_synapse_images = 0
-    
-    for idx, row in tqdm(mot_mos.iterrows(), total=len(mot_mos), desc="Synapses (center + Z-stacks)"):
-        source_name = row['source']
-        target_name = row['target']
-        
-        # Get neuron IDs
-        source_id = None
-        target_id = None
-        for fid, fname in NEURON_IDS.items():
-            if fname == source_name:
-                source_id = fid
-            if fname == target_name:
-                target_id = fid
-        
-        if source_id is None or target_id is None:
-            continue
-        
-        center_nm = (row['x'], row['y'], row['z'])
-        
-        # Generate Z-stack: -20 to +20 (41 images)
-        for z_offset in range(-20, 21):
-            # Determine output path
-            if z_offset == 0:
-                # Center slice - save as _segmented
-                output_path = os.path.join(em_snap_dir, f"synapse_{idx}_segmented.png")
-            else:
-                # Z-stack slice
-                z_str = f"z{z_offset:+04d}"
-                output_path = os.path.join(em_snap_dir, f"synapse_{idx}_{z_str}.png")
-            
-            # Skip if already exists
-            if os.path.exists(output_path):
-                skipped_synapse_images += 1
+        sdf = pd.read_csv(syn_file).dropna(subset=['x', 'y', 'z'])
+
+        # Resolve column names
+        if 'pre_type' in sdf.columns:
+            sdf['source'] = sdf['pre_type']
+            sdf['target'] = sdf['post_type']
+        elif 'pre' in sdf.columns:
+            sdf['source'] = sdf['pre']
+            sdf['target'] = sdf['post']
+        else:
+            print("  [SKIP] Cannot find source/target columns")
+            return
+
+        # Filter for MOT/MOS involved synapses
+        name2id = {v: k for k, v in neuron_ids.items()}
+        mot_mos = ['MOT_L', 'MOT_R', 'MOS_L', 'MOS_R']
+        sdf = sdf[sdf['source'].isin(mot_mos) | sdf['target'].isin(mot_mos)]
+        print(f"  Found {len(sdf)} MOT/MOS synapses")
+
+        s_new = s_skip = 0
+        for orig_idx, row in tqdm(sdf.iterrows(), total=len(sdf), desc="Synapses"):
+            sn = row['source']
+            tn = row['target']
+            sid = name2id.get(sn)
+            tid = name2id.get(tn)
+            if sid is None or tid is None:
                 continue
-            
-            img = create_segmented_snapshot(
-                em_vol, seg_vol,
-                center_nm,
-                source_id, target_id,
-                source_name, target_name,
-                z_offset_slices=z_offset,
-                size_pixels=512
-            )
-            
-            if img is not None:
-                img.save(output_path, 'PNG')
-                total_synapse_images += 1
-        
-        synapse_success += 1
-    
-    print(f"\n  [OK] Synapses: {synapse_success}/{len(mot_mos)} synapses, {total_synapse_images} new + {skipped_synapse_images} skipped")
-    
-    # ========== SUMMARY ==========
-    print("\n" + "="*70)
-    print("[5/5] COMPLETE!")
-    print("="*70)
-    print(f"  Contact patches: {contact_success} ({total_contact_images} images)")
-    print(f"  Synapses: {synapse_success} ({total_synapse_images} images)")
-    print(f"  TOTAL: {total_contact_images + total_synapse_images} images")
-    print(f"  Resolution: 512x512 pixels (4096nm × 4096nm)")
-    print(f"  Z-range: -20 to +20 (±800nm depth, 41 slices)")
-    print(f"  All images saved in: {em_snap_dir}")
-    print("="*70)
+            center_nm = (row['x'], row['y'], row['z'])
+            for z_off in range(-20, 21):
+                if z_off == 0:
+                    fname = f"synapse_{orig_idx}_segmented.png"
+                else:
+                    fname = f"synapse_{orig_idx}_z{z_off:+04d}.png"
+                opath = os.path.join(em_snap_dir, fname)
+                if os.path.exists(opath):
+                    s_skip += 1
+                    continue
+                img = create_segmented_snapshot(
+                    em_vol, seg_vol, center_nm,
+                    sid, tid, sn, tn,
+                    neuron_colors, z_offset_slices=z_off,
+                    size_pixels=512)
+                if img is not None:
+                    img.save(opath, 'PNG')
+                    s_new += 1
+        print(f"  [OK] Synapses: {s_new} new + {s_skip} skipped")
+
+    # ── Summary ─────────────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print("COMPLETE!")
+    print("=" * 70)
+    total_files = len([f for f in os.listdir(em_snap_dir) if f.endswith('.png')])
+    print(f"  Total PNG files in em_snaps/: {total_files}")
+    print(f"  Resolution: 512×512 px  (4096 nm × 4096 nm)")
+    print(f"  Overlap clusters: {len(plan)} (spatially separated)")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

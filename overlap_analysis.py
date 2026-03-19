@@ -23,42 +23,25 @@ import hashlib
 import traceback
 
 # Set Flywire Token (non-interactive-safe)
-# Preferred: set env var FLYWIRE_TOKEN before running.
+# Try env var first, then fall back to saved cave-secret.json
 token = os.environ.get('FLYWIRE_TOKEN')
 if not token:
-    # Avoid blocking prompts in non-interactive runs; fail fast with guidance
-    raise ValueError("FlyWire token missing. Set env FLYWIRE_TOKEN before running.")
+    import json
+    _secret_path = os.path.expanduser("~/.cloudvolume/secrets/cave-secret.json")
+    if os.path.exists(_secret_path):
+        with open(_secret_path) as _f:
+            token = json.load(_f).get('token', '')
+if not token:
+    raise ValueError("FlyWire token missing. Set env FLYWIRE_TOKEN or save in ~/.cloudvolume/secrets/cave-secret.json")
 
 fafbseg.flywire.set_chunkedgraph_secret(token, overwrite=True)
 
-# Define Neuron IDs (restricted scope + BIPS)
-neuron_ids = {
-    # MOT
-    720575940618519710: 'MOT_L',
-    720575940630139386: 'MOT_R',
-    # MOS
-    720575940622361270: 'MOS_L',
-    720575940622168052: 'MOS_R',
-    # VS1-4 only
-    720575940626477498: 'VS1_L',
-    720575940619878961: 'VS1_R',
-    720575940640722851: 'VS2_L',
-    720575940613126835: 'VS2_R',
-    720575940622831740: 'VS3_L',
-    720575940641812699: 'VS3_R',
-    720575940624273919: 'VS4_L',
-    720575940659799937: 'VS4_R',
-    # HS (HSN, HSE, HSS)
-    720575940628031249: 'HSN_L',
-    720575940615933919: 'HSN_R',
-    720575940629153020: 'HSE_L',
-    720575940629148007: 'HSE_R',
-    720575940622312965: 'HSS_L',
-    720575940628743496: 'HSS_R',
-    # BIPS
-    720575940623618708: 'BIPS_L',
-    720575940622581173: 'BIPS_R',
-}
+# Load neuron config from central neurons.json
+import json as _json
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json'), 'r') as _nf:
+    _cfg = _json.load(_nf)
+neuron_ids = {int(info['id']): name for name, info in _cfg['neurons'].items()}
+N_TOP_PATCHES = _cfg.get('top_patches', 10)
 
 # Configuration
 THRESHOLDS_MICRONS = [0.1]
@@ -98,7 +81,9 @@ def _find_previous_meshes():
 
 def _find_previous_pair_results(threshold_um):
     """Scan previous results for already-computed pair overlap data.
-    Returns dict: {pair_key: (area, geo_data)} from saved CSVs/patch files."""
+    Returns dict mapping pair_key -> (area, geo_data) where geo_data has
+    DISABLED: Always recompute to get real mesh face geometry."""
+    return {}  # Force fresh computation for real triangle vertices
     found = {}
     for prev_dir in _find_previous_results():
         csv_file = os.path.join(prev_dir, f'results_{threshold_um}um.csv')
@@ -107,17 +92,39 @@ def _find_previous_pair_results(threshold_um):
         try:
             df = pd.read_csv(csv_file)
             for _, row in df.iterrows():
-                # CSV columns: Source_Neuron, Target_Neuron, Contact_Area_um2
                 src = row.get('Source_Neuron', row.get('Source', ''))
                 tgt = row.get('Target_Neuron', row.get('Target', ''))
                 pair_key = f"{src}→{tgt}"
                 if pair_key not in found:
                     area = float(row.get('Contact_Area_um2', 0))
-                    found[pair_key] = area
-        except Exception:
-            pass
+                    # Reconstruct face_data from Top1..TopN columns
+                    face_data = []
+                    for pn in range(1, N_TOP_PATCHES + 1):
+                        cx = row.get(f'Top{pn}_Patch_Centroid_X', np.nan)
+                        cy = row.get(f'Top{pn}_Patch_Centroid_Y', np.nan)
+                        cz = row.get(f'Top{pn}_Patch_Centroid_Z', np.nan)
+                        pa = row.get(f'Top{pn}_Patch_Area_um2', np.nan)
+                        if pd.notna(cx) and pd.notna(cy) and pd.notna(cz):
+                            face_data.append({
+                                'face_idx': pn - 1,
+                                'vertices': np.array([[cx,cy,cz],[cx,cy,cz],[cx,cy,cz]]),
+                                'area': float(pa) * 1e6 if pd.notna(pa) else 0.0,
+                                'centroid': np.array([float(cx), float(cy), float(cz)])
+                            })
+                    geo = create_empty_geometric_data()
+                    geo['face_data'] = face_data
+                    geo['contact_area'] = area
+                    # Also store other fields if available
+                    for field, key in [('total_area_meshA','Total_Area_Source_um2'),
+                                       ('total_area_meshB','Total_Area_Target_um2')]:
+                        v = row.get(key, np.nan)
+                        if pd.notna(v):
+                            geo[field] = float(v)
+                    found[pair_key] = (area, geo)
+        except Exception as e:
+            print(f"  Warning: could not read {csv_file}: {e}")
         if found:
-            break  # use most recent previous run
+            break
     return found
 
 def _find_previous_patch_data(threshold_um):
@@ -223,18 +230,18 @@ def save_incremental_results(results, threshold_um, output_dir):
                 # Weighted average by area
                 total_patch_area = 0
                 for face_info in face_data:
-                    patch_area = face_info['area'] / 1e6  # Convert to μm²
+                    patch_area = face_info['area'] / 1e6  # Convert to um²
                     contact_centroid += face_info['centroid'] * patch_area
                     total_patch_area += patch_area
                 if total_patch_area > 0:
                     contact_centroid /= total_patch_area
         
-        # Compute top-5 largest contact patches (by area) if available
+        # Compute top-N largest contact patches (by area) if available
         top_patches = []
         if geo_data and area > 0:
             face_data = geo_data.get('face_data', []) or []
             if face_data:
-                top_patches = sorted(face_data, key=lambda fd: fd.get('area', 0), reverse=True)[:5]
+                top_patches = sorted(face_data, key=lambda fd: fd.get('area', 0), reverse=True)[:N_TOP_PATCHES]
 
         result_row = {
             'Source_Neuron': source,
@@ -250,8 +257,8 @@ def save_incremental_results(results, threshold_um, output_dir):
             'Contact_Patch_Centroid_Z_Norm': contact_centroid[2] / 40.0 if area > 0 else np.nan,
             'Is_Larger_Patch': is_larger_patch if area > 0 else False
         }
-        # Add Top1..Top5 patch areas (μm²) and centroids
-        for idx in range(5):
+        # Add Top1..TopN patch areas (um²) and centroids
+        for idx in range(N_TOP_PATCHES):
             key_area = f'Top{idx+1}_Patch_Area_um2'
             key_cx = f'Top{idx+1}_Patch_Centroid_X'
             key_cy = f'Top{idx+1}_Patch_Centroid_Y'
@@ -435,7 +442,7 @@ def save_detailed_geometric_data(all_results, output_dir):
                         **base_record,
                         'face_id': i,
                         'face_idx_original': face_info['face_idx'],
-                        'face_area_um2': face_info['area'] / 1e6,  # Convert to μm²
+                        'face_area_um2': face_info['area'] / 1e6,  # Convert to um²
                         'centroid_x': face_info['centroid'][0],
                         'centroid_y': face_info['centroid'][1],
                         'centroid_z': face_info['centroid'][2],
@@ -591,23 +598,28 @@ def _hemi_of(name: str) -> str | None:
         return 'R'
     return None
 
-def _build_overlay_toggle_js(syn_idx: list[int], mid_idx: list[int], cen_idx: list[int]) -> str:
+def _build_overlay_toggle_js(syn_idx: list[int], mid_idx: list[int], cen_idx: list[int], ovl_idx: list[int] = None) -> str:
     """Return JavaScript that toggles Plotly trace visibility via checkboxes."""
+    if ovl_idx is None:
+        ovl_idx = []
     return f"""
     function toggleTraces() {{
         var gd = document.querySelectorAll('.plotly-graph-div')[0];
         var synIdx = {syn_idx};
         var midIdx = {mid_idx};
         var cenIdx = {cen_idx};
+        var ovlIdx = {ovl_idx};
         var synOn = document.getElementById('chk_syn') ? document.getElementById('chk_syn').checked : true;
         var midOn = document.getElementById('chk_mid') ? document.getElementById('chk_mid').checked : true;
         var cenOn = document.getElementById('chk_cen') ? document.getElementById('chk_cen').checked : true;
+        var ovlOn = document.getElementById('chk_ovl') ? document.getElementById('chk_ovl').checked : true;
         var update = {{}};
         var indices = [];
         var vis = [];
         synIdx.forEach(function(i) {{ indices.push(i); vis.push(synOn); }});
         midIdx.forEach(function(i) {{ indices.push(i); vis.push(midOn); }});
         cenIdx.forEach(function(i) {{ indices.push(i); vis.push(cenOn); }});
+        ovlIdx.forEach(function(i) {{ indices.push(i); vis.push(ovlOn); }});
         if (indices.length > 0) {{
             Plotly.restyle(gd, {{'visible': vis}}, indices);
         }}
@@ -935,7 +947,7 @@ def build_mesh_and_overlap_html(neurons, all_results, valid_names, thresholds_mi
             hemi_filter=None
         )
     fig = go.Figure(data=mesh_traces + overlap_traces + syn_traces)
-    # Add Top-5 patch centroids as red hollow circles (bigger)
+    # Add Top-N patch centroids as red hollow circles (bigger)
     try:
         threshold_um = thresholds_microns[0]
         results = all_results.get(threshold_um, {})
@@ -951,12 +963,12 @@ def build_mesh_and_overlap_html(neurons, all_results, valid_names, thresholds_mi
             fds = geo.get('face_data', []) or []
             if not fds:
                 continue
-            top5 = sorted(fds, key=lambda fd: fd.get('area', 0), reverse=True)[:5]
-            cx = [fd.get('centroid',[None,None,None])[0] for fd in top5]
-            cy = [fd.get('centroid',[None,None,None])[1] for fd in top5]
-            cz = [fd.get('centroid',[None,None,None])[2] for fd in top5]
+            topN = sorted(fds, key=lambda fd: fd.get('area', 0), reverse=True)[:N_TOP_PATCHES]
+            cx = [fd.get('centroid',[None,None,None])[0] for fd in topN]
+            cy = [fd.get('centroid',[None,None,None])[1] for fd in topN]
+            cz = [fd.get('centroid',[None,None,None])[2] for fd in topN]
             fig.add_trace(go.Scatter3d(
-                x=cx, y=cy, z=cz, mode='markers', name=f"Top5 centroids → {target}",
+                x=cx, y=cy, z=cz, mode='markers', name=f"Top-N centroids → {target}",
                 marker=dict(size=7.5, color='white', opacity=0.98, symbol='circle-open',
                             line=dict(color='red', width=3)),
                 hoverinfo='name', legendgroup=f"centroids_{_get_group(target)}"
@@ -964,7 +976,7 @@ def build_mesh_and_overlap_html(neurons, all_results, valid_names, thresholds_mi
     except Exception:
         pass
     fig.update_layout(
-        title=f"Meshes and Overlap Patches — threshold {threshold_um} μm{(' ' + filename_suffix) if filename_suffix else ''}",
+        title=f"Meshes and Overlap Patches — threshold {threshold_um} um{(' ' + filename_suffix) if filename_suffix else ''}",
         scene=dict(
             xaxis_title='X', yaxis_title='Y', zaxis_title='Z',
             xaxis=dict(showbackground=False, showgrid=False, zeroline=False),
@@ -987,18 +999,20 @@ def build_mesh_and_overlap_html(neurons, all_results, valid_names, thresholds_mi
     # --- Toggle checkboxes for synapses, contact midpoints, and centroids ---
     syn_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Synapses']
     mid_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Contact vertex midpoints']
-    cen_idx = [i for i, t in enumerate(fig.data) if 'Top5 centroids' in (getattr(t, 'name', '') or '')]
-    overlay_idx = sorted(syn_idx + mid_idx + cen_idx)
+    cen_idx = [i for i, t in enumerate(fig.data) if 'Top-N centroids' in (getattr(t, 'name', '') or '')]
+    ovl_idx = [i for i, t in enumerate(fig.data) if (getattr(t, 'name', '') or '').startswith('Overlap ')]
+    overlay_idx = sorted(syn_idx + mid_idx + cen_idx + ovl_idx)
     if overlay_idx:
         raw_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
-        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx)
+        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx, ovl_idx)
         full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>
 <div style="position:fixed;top:10px;left:10px;z-index:999;background:rgba(255,255,255,0.92);
 padding:10px 14px;border-radius:8px;border:1px solid #aaa;font-family:Arial,sans-serif;font-size:13px;">
   <b>Overlay toggles</b><br>
   {'<label><input type="checkbox" id="chk_syn" checked onchange="toggleTraces()"> Synapses</label><br>' if syn_idx else ''}
   {'<label><input type="checkbox" id="chk_mid" checked onchange="toggleTraces()"> Contact midpoints</label><br>' if mid_idx else ''}
-  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-5 centroids</label>' if cen_idx else ''}
+  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-N centroids</label><br>' if cen_idx else ''}
+  {'<label><input type="checkbox" id="chk_ovl" checked onchange="toggleTraces()"> Overlap areas</label>' if ovl_idx else ''}
 </div>
 {raw_html}
 <script>{checkbox_js}</script>
@@ -1138,7 +1152,7 @@ def build_mesh_and_overlap_html_lite(neurons, all_results, valid_names, threshol
             hemi_filter=hemi_filter
         )
     fig = go.Figure(data=mesh_traces + overlap_traces + syn_traces)
-    # Add Top-5 patch centroids per pair as red hollow circles (bigger)
+    # Add Top-N patch centroids per pair as red hollow circles (bigger)
     try:
         threshold_um = thresholds_microns[0]
         results = all_results.get(threshold_um, {})
@@ -1156,12 +1170,12 @@ def build_mesh_and_overlap_html_lite(neurons, all_results, valid_names, threshol
             fds = geo.get('face_data', []) or []
             if not fds:
                 continue
-            top5 = sorted(fds, key=lambda fd: fd.get('area', 0), reverse=True)[:5]
-            cx = [fd.get('centroid',[None,None,None])[0] for fd in top5]
-            cy = [fd.get('centroid',[None,None,None])[1] for fd in top5]
-            cz = [fd.get('centroid',[None,None,None])[2] for fd in top5]
+            topN = sorted(fds, key=lambda fd: fd.get('area', 0), reverse=True)[:N_TOP_PATCHES]
+            cx = [fd.get('centroid',[None,None,None])[0] for fd in topN]
+            cy = [fd.get('centroid',[None,None,None])[1] for fd in topN]
+            cz = [fd.get('centroid',[None,None,None])[2] for fd in topN]
             fig.add_trace(go.Scatter3d(
-                x=cx, y=cy, z=cz, mode='markers', name=f"Top5 centroids → {target}",
+                x=cx, y=cy, z=cz, mode='markers', name=f"Top-N centroids → {target}",
                 marker=dict(size=7.5, color='white', opacity=0.98, symbol='circle-open',
                             line=dict(color='red', width=3)),
                 hoverinfo='name', legendgroup=f"centroids_{_get_group(target)}"
@@ -1169,7 +1183,7 @@ def build_mesh_and_overlap_html_lite(neurons, all_results, valid_names, threshol
     except Exception:
         pass
     fig.update_layout(
-        title=f"Meshes and Overlap (LITE) — threshold {threshold_um} μm",
+        title=f"Meshes and Overlap (LITE) — threshold {threshold_um} um",
         scene=dict(
             xaxis=dict(title='X', showbackground=False, showgrid=False, zeroline=False),
             yaxis=dict(title='Y', showbackground=False, showgrid=False, zeroline=False),
@@ -1184,24 +1198,26 @@ def build_mesh_and_overlap_html_lite(neurons, all_results, valid_names, threshol
     # --- Toggle checkboxes for synapses, contact midpoints, and centroids ---
     syn_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Synapses']
     mid_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Contact vertex midpoints']
-    cen_idx = [i for i, t in enumerate(fig.data) if 'Top5 centroids' in (getattr(t, 'name', '') or '')]
+    cen_idx = [i for i, t in enumerate(fig.data) if 'Top-N centroids' in (getattr(t, 'name', '') or '')]
+    ovl_idx = [i for i, t in enumerate(fig.data) if (getattr(t, 'name', '') or '').startswith('Overlap ')]
 
     hemi_suffix = f"_hemi_{hemi_filter}" if hemi_filter else ""
     extra_suffix = ("_" + filename_suffix) if filename_suffix else ""
     html_path = os.path.join(output_dir, f"meshes_and_overlaps_LITE{hemi_suffix}{extra_suffix}_{threshold_um}um.html")
 
-    overlay_idx = sorted(syn_idx + mid_idx + cen_idx)
+    overlay_idx = sorted(syn_idx + mid_idx + cen_idx + ovl_idx)
     if overlay_idx:
         # Write HTML with custom checkbox controls
         raw_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
-        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx)
+        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx, ovl_idx)
         full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>
 <div style="position:fixed;top:10px;left:10px;z-index:999;background:rgba(255,255,255,0.92);
 padding:10px 14px;border-radius:8px;border:1px solid #aaa;font-family:Arial,sans-serif;font-size:13px;">
   <b>Overlay toggles</b><br>
   {'<label><input type="checkbox" id="chk_syn" checked onchange="toggleTraces()"> Synapses</label><br>' if syn_idx else ''}
   {'<label><input type="checkbox" id="chk_mid" checked onchange="toggleTraces()"> Contact midpoints</label><br>' if mid_idx else ''}
-  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-5 centroids</label>' if cen_idx else ''}
+  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-N centroids</label><br>' if cen_idx else ''}
+  {'<label><input type="checkbox" id="chk_ovl" checked onchange="toggleTraces()"> Overlap areas</label>' if ovl_idx else ''}
 </div>
 {raw_html}
 <script>{checkbox_js}</script>
@@ -1352,7 +1368,7 @@ def build_pointcloud_and_overlap_html(neurons, all_results, valid_names, thresho
         )
         traces.extend(syn_traces)
 
-    # Add Top-5 patch centroids per pair as red hollow circles (bigger) to point-cloud figure
+    # Add Top-N patch centroids per pair as red hollow circles (bigger) to point-cloud figure
     try:
         threshold_um = thresholds_microns[0]
         results = all_results.get(threshold_um, {})
@@ -1368,12 +1384,12 @@ def build_pointcloud_and_overlap_html(neurons, all_results, valid_names, thresho
             fds = geo.get('face_data', []) or []
             if not fds:
                 continue
-            top5 = sorted(fds, key=lambda fd: fd.get('area', 0), reverse=True)[:5]
-            cx = [fd.get('centroid',[None,None,None])[0] for fd in top5]
-            cy = [fd.get('centroid',[None,None,None])[1] for fd in top5]
-            cz = [fd.get('centroid',[None,None,None])[2] for fd in top5]
+            topN = sorted(fds, key=lambda fd: fd.get('area', 0), reverse=True)[:N_TOP_PATCHES]
+            cx = [fd.get('centroid',[None,None,None])[0] for fd in topN]
+            cy = [fd.get('centroid',[None,None,None])[1] for fd in topN]
+            cz = [fd.get('centroid',[None,None,None])[2] for fd in topN]
             traces.append(go.Scatter3d(
-                x=cx, y=cy, z=cz, mode='markers', name=f"Top5 centroids → {target}",
+                x=cx, y=cy, z=cz, mode='markers', name=f"Top-N centroids → {target}",
                 marker=dict(size=7.5, color='white', opacity=0.98, symbol='circle-open',
                             line=dict(color='red', width=3)),
                 hoverinfo='name', legendgroup=f"centroids_{_get_group(target)}"
@@ -1382,7 +1398,7 @@ def build_pointcloud_and_overlap_html(neurons, all_results, valid_names, thresho
         pass
     fig = go.Figure(data=traces)
     fig.update_layout(
-        title=f"Point-cloud meshes + overlaps ({patch_mode}) — threshold {threshold_um} μm",
+        title=f"Point-cloud meshes + overlaps ({patch_mode}) — threshold {threshold_um} um",
         scene=dict(
             xaxis=dict(title='X', showbackground=False, showgrid=False, zeroline=False),
             yaxis=dict(title='Y', showbackground=False, showgrid=False, zeroline=False),
@@ -1401,18 +1417,20 @@ def build_pointcloud_and_overlap_html(neurons, all_results, valid_names, thresho
     # --- Toggle checkboxes for synapses, contact midpoints, and centroids ---
     syn_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Synapses']
     mid_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Contact vertex midpoints']
-    cen_idx = [i for i, t in enumerate(fig.data) if 'Top5 centroids' in (getattr(t, 'name', '') or '')]
-    overlay_idx = sorted(syn_idx + mid_idx + cen_idx)
+    cen_idx = [i for i, t in enumerate(fig.data) if 'Top-N centroids' in (getattr(t, 'name', '') or '')]
+    ovl_idx = [i for i, t in enumerate(fig.data) if (getattr(t, 'name', '') or '').startswith('Overlap ')]
+    overlay_idx = sorted(syn_idx + mid_idx + cen_idx + ovl_idx)
     if overlay_idx:
         raw_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
-        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx)
+        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx, ovl_idx)
         full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>
 <div style="position:fixed;top:10px;left:10px;z-index:999;background:rgba(255,255,255,0.92);
 padding:10px 14px;border-radius:8px;border:1px solid #aaa;font-family:Arial,sans-serif;font-size:13px;">
   <b>Overlay toggles</b><br>
   {'<label><input type="checkbox" id="chk_syn" checked onchange="toggleTraces()"> Synapses</label><br>' if syn_idx else ''}
   {'<label><input type="checkbox" id="chk_mid" checked onchange="toggleTraces()"> Contact midpoints</label><br>' if mid_idx else ''}
-  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-5 centroids</label>' if cen_idx else ''}
+  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-N centroids</label><br>' if cen_idx else ''}
+  {'<label><input type="checkbox" id="chk_ovl" checked onchange="toggleTraces()"> Overlap areas</label>' if ovl_idx else ''}
 </div>
 {raw_html}
 <script>{checkbox_js}</script>
@@ -1486,7 +1504,7 @@ def build_overlap_wireframe_html_lite(neurons, all_results, valid_names, thresho
             target_group_filter={"HS","VS"},
             hemi_filter=hemi_filter
         )
-    # Add Top-5 patch centroids per pair as red hollow circles (bigger) to wireframe
+    # Add Top-N patch centroids per pair as red hollow circles (bigger) to wireframe
     try:
         threshold_um = thresholds_microns[0]
         results = all_results.get(threshold_um, {})
@@ -1504,12 +1522,12 @@ def build_overlap_wireframe_html_lite(neurons, all_results, valid_names, thresho
             fds = geo.get('face_data', []) or []
             if not fds:
                 continue
-            top5 = sorted(fds, key=lambda fd: fd.get('area', 0), reverse=True)[:5]
-            cx = [fd.get('centroid',[None,None,None])[0] for fd in top5]
-            cy = [fd.get('centroid',[None,None,None])[1] for fd in top5]
-            cz = [fd.get('centroid',[None,None,None])[2] for fd in top5]
+            topN = sorted(fds, key=lambda fd: fd.get('area', 0), reverse=True)[:N_TOP_PATCHES]
+            cx = [fd.get('centroid',[None,None,None])[0] for fd in topN]
+            cy = [fd.get('centroid',[None,None,None])[1] for fd in topN]
+            cz = [fd.get('centroid',[None,None,None])[2] for fd in topN]
             traces.append(go.Scatter3d(
-                x=cx, y=cy, z=cz, mode='markers', name=f"Top5 centroids → {target}",
+                x=cx, y=cy, z=cz, mode='markers', name=f"Top-N centroids → {target}",
                 marker=dict(size=7.5, color='white', opacity=0.98, symbol='circle-open',
                             line=dict(color='red', width=3)),
                 hoverinfo='name', legendgroup=f"centroids_{_get_group(target)}"
@@ -1517,7 +1535,7 @@ def build_overlap_wireframe_html_lite(neurons, all_results, valid_names, thresho
     except Exception:
         pass
     fig = go.Figure(data=traces + overlap_traces + syn_traces)
-    fig.update_layout(title=f"Wireframe + Overlaps — {threshold_um} μm{(' ' + filename_suffix) if filename_suffix else ''}",
+    fig.update_layout(title=f"Wireframe + Overlaps — {threshold_um} um{(' ' + filename_suffix) if filename_suffix else ''}",
                       scene=dict(aspectmode='data',
                                  xaxis=dict(showbackground=False, showgrid=False, zeroline=False),
                                  yaxis=dict(showbackground=False, showgrid=False, zeroline=False),
@@ -1531,18 +1549,20 @@ def build_overlap_wireframe_html_lite(neurons, all_results, valid_names, thresho
     # --- Toggle checkboxes for synapses, contact midpoints, and centroids ---
     syn_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Synapses']
     mid_idx = [i for i, t in enumerate(fig.data) if getattr(t, 'name', '') == 'Contact vertex midpoints']
-    cen_idx = [i for i, t in enumerate(fig.data) if 'Top5 centroids' in (getattr(t, 'name', '') or '')]
-    overlay_idx = sorted(syn_idx + mid_idx + cen_idx)
+    cen_idx = [i for i, t in enumerate(fig.data) if 'Top-N centroids' in (getattr(t, 'name', '') or '')]
+    ovl_idx = [i for i, t in enumerate(fig.data) if (getattr(t, 'name', '') or '').startswith('Overlap ')]
+    overlay_idx = sorted(syn_idx + mid_idx + cen_idx + ovl_idx)
     if overlay_idx:
         raw_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
-        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx)
+        checkbox_js = _build_overlay_toggle_js(syn_idx, mid_idx, cen_idx, ovl_idx)
         full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>
 <div style="position:fixed;top:10px;left:10px;z-index:999;background:rgba(255,255,255,0.92);
 padding:10px 14px;border-radius:8px;border:1px solid #aaa;font-family:Arial,sans-serif;font-size:13px;">
   <b>Overlay toggles</b><br>
   {'<label><input type="checkbox" id="chk_syn" checked onchange="toggleTraces()"> Synapses</label><br>' if syn_idx else ''}
   {'<label><input type="checkbox" id="chk_mid" checked onchange="toggleTraces()"> Contact midpoints</label><br>' if mid_idx else ''}
-  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-5 centroids</label>' if cen_idx else ''}
+  {'<label><input type="checkbox" id="chk_cen" checked onchange="toggleTraces()"> Top-N centroids</label><br>' if cen_idx else ''}
+  {'<label><input type="checkbox" id="chk_ovl" checked onchange="toggleTraces()"> Overlap areas</label>' if ovl_idx else ''}
 </div>
 {raw_html}
 <script>{checkbox_js}</script>
@@ -1840,9 +1860,9 @@ def calculate_large_mesh_overlap(neuronA, neuronB, threshold=100.0):
         
         print(f"    # close vertices (sampled): {len(close_vertices_A)}")
         print(f"    # close faces (sampled): {len(close_faces)}")
-        print(f"    meshA total area: {meshA.area / 1e6:.4f} μm²")
-        print(f"    meshB total area: {meshB.area / 1e6:.4f} μm²")
-        print(f"    Contact area (estimated): {area_um2:.4f} μm²")
+        print(f"    meshA total area: {meshA.area / 1e6:.4f} um²")
+        print(f"    meshB total area: {meshB.area / 1e6:.4f} um²")
+        print(f"    Contact area (estimated): {area_um2:.4f} um²")
         
         return area_um2, geometric_data
         
@@ -1936,7 +1956,7 @@ def calculate_neuron_overlap_simple(neuronA, neuronB, threshold=100.0):
                     'centroid': centroid.copy()
                 })
 
-        # Convert to μm²
+        # Convert to um²
         area_um2 = total_area / 1e6
         
         # Create simplified geometric data to reduce memory usage
@@ -1963,9 +1983,9 @@ def calculate_neuron_overlap_simple(neuronA, neuronB, threshold=100.0):
         # Diagnostic prints
         print(f"    # close vertices: {len(close_vertices)}")
         print(f"    # close faces: {len(close_faces)}")
-        print(f"    meshA total area: {meshA.area / 1e6:.4f} μm²")
-        print(f"    meshB total area: {meshB.area / 1e6:.4f} μm²")
-        print(f"    Contact area: {area_um2:.4f} μm²")
+        print(f"    meshA total area: {meshA.area / 1e6:.4f} um²")
+        print(f"    meshB total area: {meshB.area / 1e6:.4f} um²")
+        print(f"    Contact area: {area_um2:.4f} um²")
         return area_um2, geometric_data
         
     except MemoryError as e:
@@ -2057,7 +2077,7 @@ def save_individual_patch_data(source, target, contact_area, geo_data, threshold
                 'Threshold_um': threshold_um,
                 'Total_Contact_Area_um2': contact_area,
                 'Patch_ID': i,
-                'Patch_Area_um2': face_info['area'] / 1e6,  # Convert to μm²
+                'Patch_Area_um2': face_info['area'] / 1e6,  # Convert to um²
                 'Patch_Centroid_X': face_info['centroid'][0],
                 'Patch_Centroid_Y': face_info['centroid'][1],
                 'Patch_Centroid_Z': face_info['centroid'][2],
@@ -2079,24 +2099,41 @@ def save_individual_patch_data(source, target, contact_area, geo_data, threshold
         print(f"    Saved {len(patch_data)} patches to {filename}")
 
 def generate_target_pairs():
-    """Generate the specific pairs for analysis: MOT/MOS vs HS/VS for both hemispheres"""
-    # Define neuron groups
-    mot_mos = ['MOT_L', 'MOT_R', 'MOS_L', 'MOS_R']
-    hs_neurons = ['HSN_L', 'HSN_R', 'HSE_L', 'HSE_R', 'HSS_L', 'HSS_R']
-    vs_neurons = ['VS1_L', 'VS1_R', 'VS2_L', 'VS2_R', 'VS3_L', 'VS3_R', 
-                  'VS4_L', 'VS4_R', 'VS5_L', 'VS5_R', 'VS6_L', 'VS6_R', 
-                  'VS7_L', 'VS7_R', 'VS8_L', 'VS8_R']
-    
+    """Generate target pairs from neurons.json pairing_rules (no BIPS)"""
+    import json as _json2
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
+    with open(cfg_path, 'r') as _f2:
+        _cfg2 = _json2.load(_f2)
+
+    # Build name→group mapping
+    name_to_group = {}
+    for name, info in _cfg2['neurons'].items():
+        name_to_group[name] = info.get('group', '')
+
+    all_names = list(_cfg2['neurons'].keys())
     target_pairs = []
-    
-    # MOT/MOS to HS/VS (both directions)
-    for mot_mos_neuron in mot_mos:
-        for target_neuron in hs_neurons + vs_neurons:
-            target_pairs.append((mot_mos_neuron, target_neuron))
-            target_pairs.append((target_neuron, mot_mos_neuron))
-    
+
+    for rule in _cfg2.get('pairing_rules', {}).get('rules', []):
+        group_a_set = set(rule['source'])
+        group_b_set = set(rule['target'])
+        bidirectional = rule.get('bidirectional', True)
+
+        names_a = [n for n in all_names if name_to_group.get(n, '') in group_a_set]
+        names_b = [n for n in all_names if name_to_group.get(n, '') in group_b_set]
+
+        for a in names_a:
+            for b in names_b:
+                if a == b:
+                    continue
+                target_pairs.append((a, b))
+                if bidirectional:
+                    target_pairs.append((b, a))
+
+    # Deduplicate
+    target_pairs = list(dict.fromkeys(target_pairs))
     print(f"Generated {len(target_pairs)} target pairs for analysis")
     return target_pairs
+
 
 def analyze_all_pairs(neurons, thresholds_microns):
     """Analyze target pairs at all thresholds with caching and incremental saving"""
@@ -2119,10 +2156,13 @@ def analyze_all_pairs(neurons, thresholds_microns):
     # Check for cached results
     cache_key = get_cache_key(neuron_ids, thresholds_microns, LOD)
     cached_data = load_from_cache(cache_key)
-    
+
     if cached_data is not None:
         print("Using cached results!")
         return cached_data['all_results'], cached_data['valid_names']
+
+
+
     
     all_results = {}
 
@@ -2131,7 +2171,7 @@ def analyze_all_pairs(neurons, thresholds_microns):
 
     for threshold_um in thresholds_microns:
         threshold_nm = threshold_um * 1000
-        print(f"\n=== Threshold {threshold_um} μm ({threshold_nm} nm) ===")
+        print(f"\n=== Threshold {threshold_um} um ({threshold_nm} nm) ===")
 
         results = {}
         pair_count = 0
@@ -2140,7 +2180,7 @@ def analyze_all_pairs(neurons, thresholds_microns):
         error_pairs = 0
         recycled_pairs = 0
 
-        # Try recycling pair results from previous runs
+        # Recycle pair results from previous runs (areas + patch files)
         prev_pair_data = _find_previous_pair_results(threshold_um)
         prev_patch_dir = _find_previous_patch_data(threshold_um)
 
@@ -2148,18 +2188,22 @@ def analyze_all_pairs(neurons, thresholds_microns):
             pair_count += 1
             pair_key = f"{source}→{target}"
 
-            # Try recycling from previous results
+            # Try recycling from previous results (now includes reconstructed geo_data)
             if pair_key in prev_pair_data:
-                prev_area = prev_pair_data[pair_key]
-                results[pair_key] = (prev_area, create_empty_geometric_data())
+                prev_result = prev_pair_data[pair_key]
+                if isinstance(prev_result, tuple):
+                    prev_area, prev_geo = prev_result
+                else:
+                    prev_area, prev_geo = prev_result, create_empty_geometric_data()
+                results[pair_key] = (prev_area, prev_geo)
                 recycled_pairs += 1
                 successful_pairs += 1
 
                 # Copy patch file if it existed
-                if prev_patch_dir and prev_area > 0:
-                    patch_filename = f"{source}_to_{target}_patch_data.csv"
-                    prev_patch_file = os.path.join(prev_patch_dir, patch_filename)
+                if prev_patch_dir and prev_area > 0 and pair_key in prev_patch_dir:
+                    prev_patch_file = prev_patch_dir[pair_key]
                     if os.path.exists(prev_patch_file):
+                        patch_filename = f"{source}_to_{target}_patch_data.csv"
                         new_patch_dir = os.path.join(RESULTS_DIR, f"individual_patches_threshold_{threshold_um}um")
                         os.makedirs(new_patch_dir, exist_ok=True)
                         shutil.copy2(prev_patch_file, os.path.join(new_patch_dir, patch_filename))
@@ -2199,7 +2243,7 @@ def analyze_all_pairs(neurons, thresholds_microns):
         all_results[threshold_um] = results
         
         # Save incremental results after each threshold
-        print(f"\nThreshold {threshold_um}μm completed:")
+        print(f"\nThreshold {threshold_um}um completed:")
         print(f"  Recycled pairs: {recycled_pairs}/{total_pairs}")
         print(f"  Computed pairs: {successful_pairs - recycled_pairs}/{total_pairs}")
         print(f"  Error pairs: {error_pairs}/{total_pairs}")
@@ -2279,7 +2323,7 @@ def visualize_matrices(matrices, valid_names, thresholds_microns):
             masked_matrix = np.where(matrix > np.percentile(matrix, 90), matrix, 0)
             
             im = ax.imshow(masked_matrix, cmap='viridis', aspect='auto')
-            ax.set_title(f'Overlap at {threshold_um} μm threshold (Top 10%)', fontsize=12)
+            ax.set_title(f'Overlap at {threshold_um} um threshold (Top 10%)', fontsize=12)
             ax.set_xlabel('Target Neuron', fontsize=10)
             ax.set_ylabel('Source Neuron', fontsize=10)
             
@@ -2288,7 +2332,7 @@ def visualize_matrices(matrices, valid_names, thresholds_microns):
             ax.set_xticklabels(valid_names, rotation=45, ha='right', fontsize=6)
             ax.set_yticklabels(valid_names, fontsize=6)
             
-            plt.colorbar(im, ax=ax, label='Contact Area (μm²)')
+            plt.colorbar(im, ax=ax, label='Contact Area (um²)')
             
             # Add annotations only for significant values
             for i in range(len(valid_names)):
@@ -2313,7 +2357,7 @@ def visualize_matrices(matrices, valid_names, thresholds_microns):
     ax.set_xticklabels(valid_names, rotation=45, ha='right', fontsize=6)
     ax.set_yticklabels(valid_names, fontsize=6)
     
-    plt.colorbar(im, ax=ax, label='Mean Contact Area (μm²)')
+    plt.colorbar(im, ax=ax, label='Mean Contact Area (um²)')
     
     # Add annotations
     for i in range(len(valid_names)):
@@ -2363,8 +2407,8 @@ def create_advanced_interactive_viz(matrices, valid_names, thresholds_microns):
                 x=valid_names,
                 y=valid_names,
                 colorscale='Viridis',
-                name=f'{threshold_um} μm',
-                hovertemplate=f'Threshold: {threshold_um} μm<br>Source: %{{y}}<br>Target: %{{x}}<br>Area: %{{z:.4f}} μm²<extra></extra>',
+                name=f'{threshold_um} um',
+                hovertemplate=f'Threshold: {threshold_um} um<br>Source: %{{y}}<br>Target: %{{x}}<br>Area: %{{z:.4f}} um²<extra></extra>',
                 visible=True if threshold_um == thresholds_microns[0] else False
             )
         )
@@ -2377,7 +2421,7 @@ def create_advanced_interactive_viz(matrices, valid_names, thresholds_microns):
             y=valid_names,
             colorscale='Plasma',
             name='Mean Overall',
-            hovertemplate='Mean across all thresholds<br>Source: %{y}<br>Target: %{x}<br>Area: %{z:.4f} μm²<extra></extra>',
+            hovertemplate='Mean across all thresholds<br>Source: %{y}<br>Target: %{x}<br>Area: %{z:.4f} um²<extra></extra>',
             visible=False
         )
     )
@@ -2389,10 +2433,10 @@ def create_advanced_interactive_viz(matrices, valid_names, thresholds_microns):
         visibility[i] = True
         threshold_buttons.append(
             dict(
-                label=f'{threshold_um} μm',
+                label=f'{threshold_um} um',
                 method='update',
                 args=[{'visible': visibility},
-                      {'title': f'Neuron Overlap Matrix - {threshold_um} μm Threshold'}]
+                      {'title': f'Neuron Overlap Matrix - {threshold_um} um Threshold'}]
             )
         )
     
@@ -2410,7 +2454,7 @@ def create_advanced_interactive_viz(matrices, valid_names, thresholds_microns):
     
     # Update layout with dropdown
     fig.update_layout(
-        title=f'Interactive Neuron Overlap Matrix - {thresholds_microns[0]} μm Threshold',
+        title=f'Interactive Neuron Overlap Matrix - {thresholds_microns[0]} um Threshold',
         xaxis_title='Target Neuron',
         yaxis_title='Source Neuron',
         width=900,
@@ -2471,18 +2515,18 @@ def save_final_combined_results(all_results, valid_names, thresholds_microns):
                             # Weighted average by area
                             total_patch_area = 0
                             for face_info in face_data:
-                                patch_area = face_info['area'] / 1e6  # Convert to μm²
+                                patch_area = face_info['area'] / 1e6  # Convert to um²
                                 contact_centroid += face_info['centroid'] * patch_area
                                 total_patch_area += patch_area
                             if total_patch_area > 0:
                                 contact_centroid /= total_patch_area
                     
-                    # Compute top-5 patches by area for this pair (if geo_data present)
+                    # Compute top-N patches by area for this pair (if geo_data present)
                     top_patches = []
                     if geo_data and area > 0:
                         fd_list = geo_data.get('face_data', []) or []
                         if fd_list:
-                            top_patches = sorted(fd_list, key=lambda fd: fd.get('area', 0), reverse=True)[:5]
+                            top_patches = sorted(fd_list, key=lambda fd: fd.get('area', 0), reverse=True)[:N_TOP_PATCHES]
 
                     result_row = {
                         'Source_Neuron': source,
@@ -2507,8 +2551,8 @@ def save_final_combined_results(all_results, valid_names, thresholds_microns):
                             'Num_Contact_Vertices': len(geo_data.get('close_vertices_meshA', [])),
                             'Num_Contact_Faces': len(geo_data.get('face_data', []))
                         })
-                    # Add Top1..Top5 patch areas (μm²) and centroids
-                    for idx in range(5):
+                    # Add Top1..TopN patch areas (um²) and centroids
+                    for idx in range(N_TOP_PATCHES):
                         key_area = f'Top{idx+1}_Patch_Area_um2'
                         key_cx = f'Top{idx+1}_Patch_Centroid_X'
                         key_cy = f'Top{idx+1}_Patch_Centroid_Y'
@@ -2526,7 +2570,7 @@ def save_final_combined_results(all_results, valid_names, thresholds_microns):
                             result_row[key_cy] = np.nan
                             result_row[key_cz] = np.nan
 
-                    else:
+                    if not (geo_data and area > 0):
                         result_row.update({
                             'Total_Area_Source_um2': np.nan,
                             'Total_Area_Target_um2': np.nan,
@@ -2589,7 +2633,7 @@ def print_summary(all_results, valid_names, thresholds_microns):
     print("="*80)
     print(f"Analyzed neurons: {', '.join(valid_names)}")
     print(f"Total neurons: {len(valid_names)}")
-    print(f"Thresholds analyzed: {thresholds_microns} μm")
+    print(f"Thresholds analyzed: {thresholds_microns} um")
     print()
     
     for threshold_um in thresholds_microns:
@@ -2604,12 +2648,12 @@ def print_summary(all_results, valid_names, thresholds_microns):
         total_pairs = len(results)
         connected_pairs = len(areas)
         
-        print(f"--- Threshold: {threshold_um} μm ---")
+        print(f"--- Threshold: {threshold_um} um ---")
         print(f"  Connected pairs: {connected_pairs}/{total_pairs} ({connected_pairs/total_pairs:.1%})")
         if areas:
-            print(f"  Mean contact area: {np.mean(areas):.4f} ± {np.std(areas):.4f} μm²")
-            print(f"  Range: {np.min(areas):.4f} - {np.max(areas):.4f} μm²")
-            print(f"  Total contact area: {np.sum(areas):.4f} μm²")
+            print(f"  Mean contact area: {np.mean(areas):.4f} ± {np.std(areas):.4f} um²")
+            print(f"  Range: {np.min(areas):.4f} - {np.max(areas):.4f} um²")
+            print(f"  Total contact area: {np.sum(areas):.4f} um²")
         print()
 
 # Main execution
@@ -2633,7 +2677,7 @@ def create_interactive_comparison_matrix(all_results, valid_names, thresholds_mi
     involved_neurons = sorted(list(involved_neurons))
     
     for threshold_um in thresholds_microns:
-        print(f"Creating interactive matrix for threshold {threshold_um} μm")
+        print(f"Creating interactive matrix for threshold {threshold_um} um")
         
         # Create matrix for involved neurons only
         n = len(involved_neurons)
@@ -2655,12 +2699,12 @@ def create_interactive_comparison_matrix(all_results, valid_names, thresholds_mi
             x=involved_neurons,
             y=involved_neurons,
             colorscale='Viridis',
-            colorbar=dict(title="Contact Area (μm²)"),
-            hovertemplate='Source: %{y}<br>Target: %{x}<br>Contact Area: %{z:.3f} μm²<extra></extra>'
+            colorbar=dict(title="Contact Area (um²)"),
+            hovertemplate='Source: %{y}<br>Target: %{x}<br>Contact Area: %{z:.3f} um²<extra></extra>'
         ))
         
         fig.update_layout(
-            title=f'Neuron Contact Matrix - Threshold {threshold_um} μm<br>MOT/MOS ↔ HS/VS Analysis',
+            title=f'Neuron Contact Matrix - Threshold {threshold_um} um<br>MOT/MOS ↔ HS/VS Analysis',
             xaxis_title='Target Neuron',
             yaxis_title='Source Neuron',
             width=800,
@@ -2674,19 +2718,19 @@ def create_interactive_comparison_matrix(all_results, valid_names, thresholds_mi
         print(f"Interactive matrix saved to: {output_file}")
         
         # Also create a summary plot showing only significant contacts
-        significant_matrix = np.where(matrix > 0.1, matrix, 0)  # Only show contacts > 0.1 μm²
+        significant_matrix = np.where(matrix > 0.1, matrix, 0)  # Only show contacts > 0.1 um²
         
         fig_sig = go.Figure(data=go.Heatmap(
             z=significant_matrix,
             x=involved_neurons,
             y=involved_neurons,
             colorscale='Viridis',
-            colorbar=dict(title="Contact Area (μm²)"),
-            hovertemplate='Source: %{y}<br>Target: %{x}<br>Contact Area: %{z:.3f} μm²<extra></extra>'
+            colorbar=dict(title="Contact Area (um²)"),
+            hovertemplate='Source: %{y}<br>Target: %{x}<br>Contact Area: %{z:.3f} um²<extra></extra>'
         ))
         
         fig_sig.update_layout(
-            title=f'Significant Neuron Contacts (>0.1 μm²) - Threshold {threshold_um} μm<br>MOT/MOS ↔ HS/VS Analysis',
+            title=f'Significant Neuron Contacts (>0.1 um²) - Threshold {threshold_um} um<br>MOT/MOS ↔ HS/VS Analysis',
             xaxis_title='Target Neuron',
             yaxis_title='Source Neuron',
             width=800,
@@ -2774,56 +2818,61 @@ def export_meshes_and_generate_viewer(neurons, results_dir):
                         snap_count += 1
             print(f"  Copied {snap_count} EM snapshots")
 
-    # Recycle geometric data from previous runs
+    # Recycle geometric data from previous runs (always fill missing files)
     geo_dir = os.path.join(results_dir, 'geometric_data')
-    if not os.path.isdir(geo_dir) or not os.listdir(geo_dir):
+    os.makedirs(geo_dir, exist_ok=True)
+    critical_geo_files = ['contact_vertices.csv', 'contact_faces.csv', 'contact_patches.csv']
+    missing = [f for f in critical_geo_files if not os.path.exists(os.path.join(geo_dir, f))]
+    if missing:
         for prev_dir in _find_previous_results():
             prev_geo = os.path.join(prev_dir, 'geometric_data')
-            if os.path.isdir(prev_geo) and os.listdir(prev_geo):
-                print(f"\nRecycling geometric data from: {prev_geo}")
-                os.makedirs(geo_dir, exist_ok=True)
+            if os.path.isdir(prev_geo):
+                copied = 0
                 for fname in os.listdir(prev_geo):
                     src = os.path.join(prev_geo, fname)
                     dst = os.path.join(geo_dir, fname)
                     if not os.path.exists(dst):
                         shutil.copy2(src, dst)
+                        copied += 1
+                if copied:
+                    print(f"\nRecycled {copied} geometric data files from: {prev_geo}")
                 break
 
-    # Generate EM overlay viewer
-    print("\nGenerating EM overlay viewer...")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    viewer_script = os.path.join(script_dir, "em_viewer.py")
+    # DISABLED: em_viewer.html generation (duplicate).
+    # The single comprehensive viewer is generated by skeleton_em_viewer.py.
+    print("Skipping em_viewer.html (consolidated into skeleton_em_viewer.py)")
 
-    if not os.path.exists(viewer_script):
-        print(f"  Warning: EM viewer script not found at {viewer_script}")
-        print("  You can run it manually later with: python em_viewer.py")
-        return
 
-    try:
-        # Run the EM viewer generator
-        result = subprocess.run(
-            [sys.executable, viewer_script],
-            cwd=script_dir,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
 
-        if result.returncode == 0:
-            print("  EM viewer generated successfully!")
-            print(f"  Output: {result.stdout}")
-            
-            # Print the path to the HTML file
-            viewer_html = os.path.join(results_dir, "em_viewer.html")
-            if os.path.exists(viewer_html):
-                print(f"\n  >>> Open viewer in browser: file:///{os.path.abspath(viewer_html)}")
-        else:
-            print(f"  EM viewer generation failed:")
-            print(f"  {result.stderr}")
-    except subprocess.TimeoutExpired:
-        print("  EM viewer generation timed out (60s limit)")
-    except Exception as e:
-        print(f"  Error running EM viewer: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 if __name__ == "__main__":
     print("Starting comprehensive pairwise neuron overlap analysis...")
@@ -2896,12 +2945,12 @@ if __name__ == "__main__":
         try:
             thr = THRESHOLDS_MICRONS[0]
             # Participants filters: plot only cells participating in contacts
-            participant_sources = {"MOT", "MOS", "BIPS"}
-            participant_targets = {"HS", "VS", "BIPS"}
+            participant_sources = {"MOT", "MOS"}
+            participant_targets = {"HS", "VS"}
             all_include = compute_contact_participants(all_results, thr, participant_sources, participant_targets)
 
-            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS", "VS", "BIPS"})
-            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS", "VS", "BIPS"})
+            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS", "VS"})
+            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS", "VS"})
 
             # All MOT+MOS (only participants)
             build_mesh_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
@@ -2911,12 +2960,12 @@ if __name__ == "__main__":
             # MOT-only (only HS targets)
             build_mesh_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                         filename_suffix="MOT_only", source_group_filter={"MOT"},
-                                        target_group_filter={"HS","VS","BIPS"}, include_names=mot_include,
+                                        target_group_filter={"HS","VS"}, include_names=mot_include,
                                         synapses_df=syn_df_global)
             # MOS-only (HS and VS targets)
             build_mesh_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                         filename_suffix="MOS_only", source_group_filter={"MOS"},
-                                        target_group_filter={"HS","VS","BIPS"}, include_names=mos_include,
+                                        target_group_filter={"HS","VS"}, include_names=mos_include,
                                         synapses_df=syn_df_global)
         except Exception as e:
             print(f"Meshes + overlaps HTML failed (non-critical): {e}")
@@ -2926,11 +2975,11 @@ if __name__ == "__main__":
         # Always attempt to build LITE HTML (browser-friendly), even if heavy failed
         try:
             thr = THRESHOLDS_MICRONS[0]
-            participant_sources = {"MOT", "MOS", "BIPS"}
-            participant_targets = {"HS", "VS", "BIPS"}
+            participant_sources = {"MOT", "MOS"}
+            participant_targets = {"HS", "VS"}
             all_include = compute_contact_participants(all_results, thr, participant_sources, participant_targets)
-            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS","BIPS"})
-            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS","BIPS"})
+            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS"})
+            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS"})
 
             # All sources
             build_mesh_and_overlap_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
@@ -2970,12 +3019,12 @@ if __name__ == "__main__":
             build_mesh_and_overlap_html_lite(
                 neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                 hemi_filter='L', mot_mos_faces=50000, hs_vs_faces=12000, filename_suffix="MOS_only",
-                source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, include_names=mos_include, synapses_df=syn_df_global
+                source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, include_names=mos_include, synapses_df=syn_df_global
             )
             build_mesh_and_overlap_html_lite(
                 neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                 hemi_filter='R', mot_mos_faces=50000, hs_vs_faces=12000, filename_suffix="MOS_only",
-                source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, include_names=mos_include, synapses_df=syn_df_global
+                source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, include_names=mos_include, synapses_df=syn_df_global
             )
         except Exception as e:
             print(f"Meshes + overlaps LITE HTML failed (non-critical): {e}")
@@ -2985,22 +3034,22 @@ if __name__ == "__main__":
         # Also attempt a point-cloud visualization as a very robust fallback
         try:
             thr = THRESHOLDS_MICRONS[0]
-            participant_sources = {"MOT", "MOS", "BIPS"}
-            participant_targets = {"HS", "VS", "BIPS"}
+            participant_sources = {"MOT", "MOS"}
+            participant_targets = {"HS", "VS"}
             all_include = compute_contact_participants(all_results, thr, participant_sources, participant_targets)
-            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS","BIPS"})
-            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS","BIPS"})
+            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS"})
+            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS"})
             build_pointcloud_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               points_per_neuron=50000, patch_mode='points', max_patch_faces=100000,
-                                              filename_suffix="ALL", target_group_filter={"HS","VS","BIPS"}, include_names=all_include,
+                                              filename_suffix="ALL", target_group_filter={"HS","VS"}, include_names=all_include,
                                               synapses_df=syn_df_global)
             build_pointcloud_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               points_per_neuron=50000, patch_mode='points', max_patch_faces=100000,
-                                              filename_suffix="MOT_only", source_group_filter={"MOT"}, target_group_filter={"HS","VS","BIPS"}, include_names=mot_include,
+                                              filename_suffix="MOT_only", source_group_filter={"MOT"}, target_group_filter={"HS","VS"}, include_names=mot_include,
                                               synapses_df=syn_df_global)
             build_pointcloud_and_overlap_html(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               points_per_neuron=50000, patch_mode='points', max_patch_faces=100000,
-                                              filename_suffix="MOS_only", source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, include_names=mos_include,
+                                              filename_suffix="MOS_only", source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, include_names=mos_include,
                                               synapses_df=syn_df_global)
         except Exception as e:
             print(f"Point-cloud HTML failed (non-critical): {e}")
@@ -3010,11 +3059,11 @@ if __name__ == "__main__":
         # Additionally produce wireframe alternatives (very light)
         try:
             thr = THRESHOLDS_MICRONS[0]
-            participant_sources = {"MOT", "MOS", "BIPS"}
-            participant_targets = {"HS", "VS", "BIPS"}
+            participant_sources = {"MOT", "MOS"}
+            participant_targets = {"HS", "VS"}
             all_include = compute_contact_participants(all_results, thr, participant_sources, participant_targets)
-            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS","BIPS"})
-            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS","BIPS"})
+            mot_include = compute_contact_participants(all_results, thr, {"MOT"}, {"HS","VS"})
+            mos_include = compute_contact_participants(all_results, thr, {"MOS"}, {"HS","VS"})
             # ALL
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               filename_suffix="ALL", include_names=all_include,
@@ -3022,11 +3071,11 @@ if __name__ == "__main__":
             # MOT-only
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               filename_suffix="MOT_only", include_names=mot_include,
-                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
             # MOS-only
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               filename_suffix="MOS_only", include_names=mos_include,
-                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
             # Hemi L/R
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='L', filename_suffix="ALL", include_names=all_include,
@@ -3037,17 +3086,17 @@ if __name__ == "__main__":
             # Hemi L/R MOT-only
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='L', filename_suffix="MOT_only", include_names=mot_include,
-                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='R', filename_suffix="MOT_only", include_names=mot_include,
-                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOT"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
             # Hemi L/R MOS-only
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='L', filename_suffix="MOS_only", include_names=mos_include,
-                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
             build_overlap_wireframe_html_lite(neurons, all_results, valid_names, THRESHOLDS_MICRONS, RESULTS_DIR,
                                               hemi_filter='R', filename_suffix="MOS_only", include_names=mos_include,
-                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS","BIPS"}, synapses_df=syn_df_global)
+                                              source_group_filter={"MOS"}, target_group_filter={"HS","VS"}, synapses_df=syn_df_global)
         except Exception as e:
             print(f"Wireframe HTML failed (non-critical): {e}")
 
