@@ -1675,6 +1675,44 @@ def load_overlap_vertices(results_dir):
         n_pairs = len(set(tuple(sorted(k)) for k in em_meta_list.keys()))
         print(f"[overlaps] Loaded EM metadata: {n_entries} sub-clusters across {n_pairs} pairs")
 
+        # Ensure every meta entry has z_base_nm (absolute Z of first EM slice).
+        # Older overlap_em_meta.json files may lack this field; compute from faces.
+        needs_zbase = any(
+            item.get('z_base_nm') is None
+            for items in em_meta_list.values() for item in items
+        )
+        if needs_zbase:
+            faces_csv = os.path.join(results_dir, 'geometric_data', 'contact_faces.csv')
+            if os.path.exists(faces_csv):
+                from scipy.cluster.hierarchy import linkage, fcluster
+                fdf = pd.read_csv(faces_csv)
+                fdf['pair_key'] = fdf.apply(
+                    lambda r: tuple(sorted([r['neuron_a'], r['neuron_b']])), axis=1)
+                _zb_lookup = {}
+                for pk, grp in fdf.groupby('pair_key'):
+                    cents = grp[['centroid_x', 'centroid_y', 'centroid_z']].values
+                    if len(cents) > 1:
+                        _labels = fcluster(linkage(cents, method='single'),
+                                           t=10000, criterion='distance')
+                    else:
+                        _labels = np.array([1])
+                    for cl in range(1, int(_labels.max()) + 1):
+                        cz = grp['centroid_z'].values[_labels == cl]
+                        _zb_lookup[(*pk, cl)] = int(np.round(cz / 40).min()) * 40
+                patched = 0
+                for items in em_meta_list.values():
+                    for item in items:
+                        if item.get('z_base_nm') is not None:
+                            continue
+                        key = (item['source'], item['target'], item.get('cluster_label', 1))
+                        zb = _zb_lookup.get(key) or _zb_lookup.get(
+                            (item['target'], item['source'], item.get('cluster_label', 1)))
+                        if zb is not None:
+                            item['z_base_nm'] = zb
+                            patched += 1
+                if patched:
+                    print(f"[overlaps] Computed z_base_nm for {patched // 2} entries from contact_faces.csv")
+
     # per_neuron: all overlap vertices for a neuron (for 'All overlaps')
     per_neuron = {}
     for neuron in pd.concat([df['neuron_a'], df['neuron_b']]).unique():
