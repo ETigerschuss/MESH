@@ -369,6 +369,7 @@ def main():
                 'x': entry['x'],
                 'y': entry['y'],
                 'z': entry['z'],
+                'z_base_nm': entry['z_lo'] * 40,
                 'z_lo': 0,
                 'z_hi': entry['z_hi'] - entry['z_lo'],
                 'n_slices': entry['n_slices'],

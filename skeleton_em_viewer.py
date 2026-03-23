@@ -193,6 +193,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
         #btnExport { background: #2E7D32; border-color: #4CAF50; }
         #btnExport:hover { background: #388E3C; }
+        #btnMarkGJ { background: #1B5E20; border-color: #00E676; }
+        #btnMarkGJ:hover { background: #2E7D32; }
+        #btnMarkGJ.active { background: #00E676; border-color: #00E676; color: #000; }
+        #btnRemoveGJ { background: #4A0000; border-color: #900; }
+        #btnRemoveGJ:hover { background: #6B0000; }
+
+        /* ── Modal tab bar ─────────────────────── */
+        .modal-tabs { display: flex; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #555; }
+        .modal-tab {
+            padding: 6px 16px; cursor: pointer; background: #333; color: #aaa;
+            border: 1px solid #555; border-bottom: none; border-radius: 6px 6px 0 0;
+            font-size: 12px; font-weight: bold;
+        }
+        .modal-tab:hover { background: #444; color: #fff; }
+        .modal-tab.active { background: #2a2a2a; color: #FFD400; border-bottom: 2px solid #2a2a2a; margin-bottom: -2px; }
+        .modal-tab-content { display: none; }
+        .modal-tab-content.active { display: block; }
+        .gj-table { border-collapse: collapse; font-size: 11px; width: 100%; }
+        .gj-table th { background: #333; color: #FFD400; padding: 4px 8px; border: 1px solid #444; text-align: left; font-size: 10px; }
+        .gj-table td { padding: 4px 8px; border: 1px solid #333; font-size: 10px; color: #ccc; }
+        .gj-table tr:hover { background: #333; }
+        .gj-table .gj-delete { cursor: pointer; color: #B00; }
+        .gj-table .gj-delete:hover { color: #F44; }
 
         /* ── Heatmap matrix ─────────────────────── */
         .heatmap-container {
@@ -280,6 +303,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     <span id="zNote" style="color: #888; font-size: 10px;">&#177;800nm depth range</span>
                     <button id="btnDeleteSlice" title="Remove this single slice (contact or overlap Z-slice)">&#128465; Delete Slice</button>
                     <button id="btnDeleteAll" title="Remove entire overlap pair (all slices)">&#128465; Delete All</button>
+                    <button id="btnMarkGJ" title="Mark current location as putative gap junction">&#9889; Mark Gap Junction</button>
+                    <button id="btnRemoveGJ" title="Remove gap junction at current location" style="display:none;">&#10006; Remove GJ</button>
                     <button id="btnMatrix" title="Show overlap area heatmap matrix" style="background:#1565C0;border-color:#42A5F5;">&#9638; Matrix</button>
                     <button id="btnExport" title="Export list of deleted contacts">&#128190; Export</button>
                 </div>
@@ -287,12 +312,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- Heatmap Modal -->
+    <!-- Matrix / Gap-Junction Modal -->
     <div class="modal-overlay" id="matrixModal">
         <div class="modal-content">
             <button class="modal-close" id="matrixClose">&times;</button>
-            <h3>Overlap Area Matrix (&micro;m&sup2;)</h3>
-            <div class="heatmap-container" id="heatmapContainer"></div>
+            <h3 id="modalTitle">Overlap Area Matrix (&micro;m&sup2;)</h3>
+            <div class="modal-tabs">
+                <div class="modal-tab active" data-tab="overlaps">Overlap Areas</div>
+                <div class="modal-tab" data-tab="gapjunctions">Gap Junctions</div>
+            </div>
+            <div class="modal-tab-content active" id="tabOverlaps">
+                <div class="heatmap-container" id="heatmapContainer"></div>
+            </div>
+            <div class="modal-tab-content" id="tabGapJunctions">
+                <div id="gjContainer" style="padding:8px;"></div>
+            </div>
         </div>
     </div>
 
@@ -328,6 +362,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const deletedBanner = document.getElementById('deletedBanner');
         const heatmapDiv    = document.getElementById('heatmapContainer');
         const matrixModal   = document.getElementById('matrixModal');
+        const btnMarkGJ     = document.getElementById('btnMarkGJ');
+        const btnRemoveGJ   = document.getElementById('btnRemoveGJ');
+        const gjContainer   = document.getElementById('gjContainer');
+        const modalTitle    = document.getElementById('modalTitle');
 
         const sidebar       = document.querySelector('.sidebar');
         const centerCol     = document.querySelector('.center-col');
@@ -342,6 +380,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const deletedOverlapPairs = new Set();      // fully eliminated overlap idxs
         // Track current 3D position for indicator
         let curItemX = 0, curItemY = 0, curItemZ = 0, curItemZnm = 0;
+        // Track current item's pair for gap junction marking
+        let currentSource = '', currentTarget = '';
+        // Gap junction state
+        const gapJunctions = [];  // [{x, y, z, source, target, kind, idx, zOffset, timestamp}]
+        let gjTraceIdx = traceInfo['_gap_junctions'];
 
         // ── WebGL context loss recovery ─────────────────────────────
         plotDiv.addEventListener('webglcontextlost', function(e) {
@@ -709,6 +752,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 if (Math.sqrt(dx*dx + dy*dy) > 5) return;
             }
             const cd = pt.customdata;
+            // Gap-junction trace click — navigate back to the item + Z-offset
+            if (pt.curveNumber === gjTraceIdx && pt.pointNumber !== undefined) {
+                const gj = gapJunctions[pt.pointNumber];
+                if (gj) navigateToGJ(gj);
+                return;
+            }
             // Mesh3d (overlap faces) have no customdata — find nearest overlap pair
             if (!cd) {
                 if (pt.x !== undefined && pt.y !== undefined && pt.z !== undefined) {
@@ -720,10 +769,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         if (d < bestDist) { bestDist = d; bestOv = ov; }
                     });
                     if (bestOv) {
-                        // Use the actual click point for the 3D indicator
                         selectItem('overlap', bestOv.idx, bestOv.x, bestOv.y, bestOv.z,
                                    bestOv.source, bestOv.target);
-                        update3DIndicator(pt.x, pt.y, pt.z);
+                        // Jump to the Z-slice nearest the actual click point
+                        jumpToNearestZ(bestOv, pt.z);
                     }
                 }
                 return;
@@ -731,12 +780,44 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const [x, y, z, kind, source, target, idx] = cd;
             if (kind === 'mesh') return;
             selectItem(kind, idx, x, y, z, source, target);
+            // For overlap scatter clicks, jump to the Z-slice nearest the vertex
+            if (kind === 'overlap') {
+                const ov = overlapList.find(o => o.idx === idx);
+                if (ov) jumpToNearestZ(ov, z);
+            }
         });
+
+        // Navigate to a gap junction's exact item and Z-offset
+        function navigateToGJ(gj) {
+            // Re-select the original item
+            const list = gj.kind === 'contact' ? contactList
+                       : gj.kind === 'synapse' ? synapseList : overlapList;
+            const item = list.find(i => i.idx === gj.idx);
+            if (!item) return;
+            selectItem(gj.kind, gj.idx, item.x, item.y, item.z, gj.source, gj.target);
+            // Now navigate to the exact Z-offset where the GJ was marked
+            if (gj.zOffset !== 0 && gj.zOffset !== undefined) {
+                zSlider.value = gj.zOffset;
+                loadImage(gj.kind, gj.idx, gj.zOffset);
+            }
+        }
+
+        // Jump Z-slider to the offset closest to a clicked Z coordinate
+        function jumpToNearestZ(ov, clickedZ) {
+            // ov.z = z_base_nm (absolute Z of lowest EM slice)
+            const rawOffset = Math.round((clickedZ - ov.z) / 40);
+            let best = Math.max(parseInt(zSlider.min), Math.min(parseInt(zSlider.max), rawOffset));
+            best = snapToValidZ(best);
+            zSlider.value = best;
+            loadImage('overlap', ov.idx, best);
+        }
 
         function selectItem(kind, idx, x, y, z, source, target) {
             currentKind = kind;
             currentIdx = idx;
             currentZ = 0;
+            currentSource = source;
+            currentTarget = target;
             zSlider.value = 0;
             currentList = getVisibleItems(kind);
             currentListIndex = currentList.indexOf(idx);
@@ -771,9 +852,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 zSlider.dataset.validZ = '';
             }
 
-            // Update 3D position indicator
-            update3DIndicator(x, y, z);
-            curItemZnm = z;  // base Z in nm for offset calculation
+            // Set base Z and initial diamond position
+            curItemZnm = z;  // default: use the passed-in Z
+            if (kind === 'overlap') {
+                const ov = overlapList.find(o => o.idx === idx);
+                if (ov) {
+                    // ov.z = z_base_nm (absolute Z of the first EM slice)
+                    curItemZnm = ov.z;
+                    // Start diamond at EM-slice-0 center coords
+                    const sc0 = ov.slice_coords && ov.slice_coords['0'];
+                    if (sc0) { x = sc0[0]; y = sc0[1]; }
+                }
+            }
+            curItemX = x; curItemY = y;
+            update3DIndicator(x, y, curItemZnm);
 
             loadImage(kind, idx, 0);
         }
@@ -787,6 +879,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 emPlaceholder.textContent = 'No snapshot for ' + kind + ' ' + idx;
                 return;
             }
+            currentZ = zOffset;  // sync so stepValidZ always sees latest offset
             if (zOffset === 0) {
                 emImage.src = imgData;
                 emImage.style.display = 'block';
@@ -795,9 +888,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             } else {
                 loadZStackImage(kind, idx, zOffset);
             }
-            // Update 3D indicator Z position
+            // For overlaps: update X,Y from per-slice EM center coords
+            if (kind === 'overlap') {
+                const ov = overlapList.find(o => o.idx === idx);
+                if (ov && ov.slice_coords) {
+                    const sc = ov.slice_coords[String(zOffset)];
+                    if (sc) { curItemX = sc[0]; curItemY = sc[1]; }
+                }
+            }
+            // Update 3D diamond to match current EM slice position
             const newZ = curItemZnm + zOffset * 40;
             update3DIndicator(curItemX, curItemY, newZ);
+            // Update location display with diamond coords
+            emLocation.textContent = currentSource + ' \u2192 ' + currentTarget
+                + ' at (' + Math.round(curItemX) + ', ' + Math.round(curItemY) + ', ' + Math.round(curItemZ) + ')';
         }
 
         function loadZStackImage(kind, idx, zOffset) {
@@ -924,6 +1028,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 emLocation.textContent = item.source + ' \u2192 ' + item.target;
                 curItemX = item.x; curItemY = item.y;
                 curItemZnm = item.z;
+                currentSource = item.source;
+                currentTarget = item.target;
             }
             itemInfo.textContent = currentKind.charAt(0).toUpperCase()
                 + currentKind.slice(1) + ' '
@@ -947,7 +1053,59 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
             currentZ = 0; zSlider.value = 0;
             loadImage(currentKind, newIdx, 0);
-            if (item) update3DIndicator(item.x, item.y, item.z);
+        }
+
+        // ── Helper: update slider text after deletion ────────────
+        function updateSliderInfo(ov) {
+            if (!ov) return;
+            const vz = ov.valid_z || [];
+            if (vz.length > 0) {
+                const lo = Math.min(...vz);
+                const hi = Math.max(...vz);
+                zSlider.min = lo;
+                zSlider.max = hi;
+                zNote.textContent = vz.length + ' EM slices  (Z: ' + lo + ' to ' + hi + ')';
+            } else {
+                zNote.textContent = '0 EM slices  (all deleted)';
+            }
+        }
+
+        // ── Helper: update BOTH directions in overlapTable ──────────
+        function findTableRows(source, target) {
+            return overlapTable.filter(
+                r => (r.source === source && r.target === target)
+                  || (r.source === target && r.target === source));
+        }
+
+        // ── Helper: recalculate pair area from ALL sub-clusters ─────
+        // Each sub-cluster has area_um2 and orig_n_slices.
+        // Compute overall remaining fraction, apply to each tableRow's original area.
+        function recalcPairArea(source, target) {
+            // Find all sub-clusters for this undirected pair
+            const subs = overlapList.filter(
+                o => (o.source === source && o.target === target)
+                  || (o.source === target && o.target === source));
+            let totalOrigArea = 0;
+            let totalRemainArea = 0;
+            let allEliminated = true;
+            subs.forEach(sub => {
+                const origN = sub.orig_n_slices || 1;
+                const curN = (sub.valid_z || []).length;
+                totalOrigArea += sub.area_um2;
+                if (curN > 0) {
+                    totalRemainArea += sub.area_um2 * (curN / origN);
+                    allEliminated = false;
+                }
+            });
+            const fraction = totalOrigArea > 0
+                ? totalRemainArea / totalOrigArea : 0;
+            // Update both directions in overlapTable
+            const tableRows = findTableRows(source, target);
+            tableRows.forEach(row => {
+                if (!row._orig_area) row._orig_area = row.area;
+                row.area = allEliminated ? 0 : row._orig_area * fraction;
+                row.status = allEliminated ? 'eliminated' : 'active';
+            });
         }
 
         // ── Helper: refresh 3D traces + matrix after any deletion ───
@@ -1021,32 +1179,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
                 // Remove this z from valid_z and recalculate area
                 if (ov && ov.valid_z) {
-                    const origLen = ov.valid_z.length;
                     ov.valid_z = ov.valid_z.filter(z => {
                         return !deletedOverlapSlices.has(currentIdx + ':' + z);
                     });
-                    const remainLen = ov.valid_z.length;
-                    // Update slider valid_z
+                    // Update slider valid_z + text
                     zSlider.dataset.validZ = ov.valid_z.length
                         ? JSON.stringify(ov.valid_z) : '';
+                    updateSliderInfo(ov);
 
-                    // Recalculate overlap area proportionally
-                    const tableRow = overlapTable.find(
-                        r => (r.source === ov.source && r.target === ov.target)
-                          || (r.source === ov.target && r.target === ov.source));
-                    if (tableRow && origLen > 0) {
-                        // Store original area on first delete
-                        if (!tableRow.orig_area && tableRow.area > 0) {
-                            tableRow.orig_area = tableRow.area;
-                        }
-                        const fraction = remainLen / origLen;
-                        tableRow.area = tableRow.orig_area
-                            ? tableRow.orig_area * fraction : 0;
-                        if (remainLen === 0) {
-                            tableRow.area = 0;
-                            tableRow.status = 'eliminated';
-                            deletedOverlapPairs.add(currentIdx);
-                        }
+                    // Recalculate pair area from ALL sub-clusters
+                    recalcPairArea(ov.source, ov.target);
+                    if (ov.valid_z.length === 0) {
+                        deletedOverlapPairs.add(currentIdx);
                     }
                 }
                 infoText.textContent = '\u2717 Deleted overlap slice #' + currentIdx
@@ -1097,20 +1241,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             });
 
             // Clear valid_z and set area to 0
-            const origLen = ov.valid_z ? ov.valid_z.length : 0;
             ov.valid_z = [];
             zSlider.dataset.validZ = '';
+            updateSliderInfo(ov);
 
-            const tableRow = overlapTable.find(
-                r => (r.source === ov.source && r.target === ov.target)
-                  || (r.source === ov.target && r.target === ov.source));
-            if (tableRow) {
-                if (!tableRow.orig_area && tableRow.area > 0) {
-                    tableRow.orig_area = tableRow.area;
-                }
-                tableRow.area = 0;
-                tableRow.status = 'eliminated';
-            }
+            // Recalculate pair area from ALL sub-clusters
+            // (other sub-clusters of this pair may still have slices)
+            recalcPairArea(ov.source, ov.target);
 
             deletedBanner.style.display = 'block';
             deletedBanner.textContent = '\u2717 DELETED \u2014 entire overlap pair eliminated ('
@@ -1133,24 +1270,107 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         // ── Export deletions ────────────────────────────────────────
         btnExport.addEventListener('click', function() {
-            if (deletedItems.length === 0) {
-                alert('No deletions yet.'); return;
+            if (deletedItems.length === 0 && gapJunctions.length === 0) {
+                alert('No deletions or gap junctions yet.'); return;
             }
+            const exportData = {
+                deletedItems: deletedItems,
+                gapJunctions: gapJunctions
+            };
             const blob = new Blob(
-                [JSON.stringify(deletedItems, null, 2)],
+                [JSON.stringify(exportData, null, 2)],
                 {type: 'application/json'}
             );
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
-            a.download = 'deleted_items.json';
+            a.download = 'viewer_annotations.json';
             a.click();
             URL.revokeObjectURL(a.href);
-            infoText.textContent = '\u2713 Exported ' + deletedItems.length + ' deletions';
+            infoText.textContent = '\u2713 Exported ' + deletedItems.length + ' deletions, '
+                + gapJunctions.length + ' gap junctions';
         });
+
+        // ── Gap-junction marking ────────────────────────────────────
+        btnMarkGJ.addEventListener('click', function() {
+            if (currentKind === null || currentIdx === null) {
+                alert('Select an overlap, contact, or synapse first.'); return;
+            }
+            if (!currentSource || !currentTarget) {
+                alert('Cannot determine neuron pair for current item.'); return;
+            }
+
+            const gj = {
+                x: curItemX, y: curItemY, z: curItemZ,
+                source: currentSource, target: currentTarget,
+                kind: currentKind, idx: currentIdx,
+                zOffset: currentZ,
+                timestamp: new Date().toISOString()
+            };
+            gapJunctions.push(gj);
+            updateGJTrace();
+            updateRemoveGJButton();
+            infoText.textContent = '\u26a1 Gap junction #' + gapJunctions.length
+                + ' marked at ' + currentSource + ' \u2194 ' + currentTarget
+                + ' (' + Math.round(curItemX) + ', ' + Math.round(curItemY)
+                + ', ' + Math.round(curItemZ) + ')';
+        });
+
+        btnRemoveGJ.addEventListener('click', function() {
+            // Find the nearest gap junction to the current 3D indicator position
+            let bestIdx = -1, bestDist = Infinity;
+            gapJunctions.forEach((gj, i) => {
+                const d = Math.sqrt(
+                    (curItemX - gj.x) ** 2 +
+                    (curItemY - gj.y) ** 2 +
+                    (curItemZ - gj.z) ** 2);
+                if (d < bestDist) { bestDist = d; bestIdx = i; }
+            });
+            if (bestIdx >= 0) {
+                const removed = gapJunctions.splice(bestIdx, 1)[0];
+                updateGJTrace();
+                updateRemoveGJButton();
+                infoText.textContent = '\u2716 Removed gap junction #' + (bestIdx + 1)
+                    + ' (' + removed.source + ' \u2194 ' + removed.target + ')';
+            }
+        });
+
+        function updateRemoveGJButton() {
+            // Show Remove GJ button only when there's a nearby gap junction
+            if (gapJunctions.length === 0) { btnRemoveGJ.style.display = 'none'; return; }
+            let minDist = Infinity;
+            gapJunctions.forEach(gj => {
+                const d = Math.sqrt(
+                    (curItemX - gj.x) ** 2 +
+                    (curItemY - gj.y) ** 2 +
+                    (curItemZ - gj.z) ** 2);
+                if (d < minDist) minDist = d;
+            });
+            // Show if any GJ is within 5000nm of current indicator
+            btnRemoveGJ.style.display = (minDist < 5000) ? 'inline-block' : 'none';
+        }
+
+        function updateGJTrace() {
+            if (gjTraceIdx === undefined) return;
+            const allX = [], allY = [], allZ = [], allText = [];
+            gapJunctions.forEach((gj, i) => {
+                allX.push(gj.x);
+                allY.push(gj.y);
+                allZ.push(gj.z);
+                allText.push('GJ #' + (i + 1) + ': ' + gj.source + ' \u2194 ' + gj.target);
+            });
+            const trace = plotDiv.data[gjTraceIdx];
+            if (trace) {
+                trace.x = allX; trace.y = allY; trace.z = allZ;
+                trace.text = allText;
+                trace.visible = allX.length > 0;
+                scheduleRedraw();
+            }
+        }
 
         // ── Matrix modal ────────────────────────────────────────────
         btnMatrix.addEventListener('click', function() {
             renderHeatmap();
+            renderGJTab();
             matrixModal.classList.add('active');
         });
         document.getElementById('matrixClose').addEventListener('click', () => {
@@ -1158,6 +1378,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         });
         matrixModal.addEventListener('click', function(e) {
             if (e.target === matrixModal) matrixModal.classList.remove('active');
+        });
+        // Tab switching
+        document.querySelectorAll('.modal-tab').forEach(tab => {
+            tab.addEventListener('click', function() {
+                document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.modal-tab-content').forEach(c => c.classList.remove('active'));
+                this.classList.add('active');
+                const target = this.dataset.tab;
+                if (target === 'overlaps') {
+                    document.getElementById('tabOverlaps').classList.add('active');
+                    modalTitle.textContent = 'Overlap Area Matrix (\u00b5m\u00b2)';
+                } else {
+                    document.getElementById('tabGapJunctions').classList.add('active');
+                    modalTitle.textContent = 'Putative Gap Junctions';
+                }
+            });
         });
 
         function renderHeatmap() {
@@ -1209,6 +1445,81 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     if (ov) { selectItem('overlap', ov.idx, ov.x, ov.y, ov.z, ov.source, ov.target); return; }
                     const c = contactList.find(c => c.source === src && c.target === tgt);
                     if (c) selectItem('contact', c.idx, c.x, c.y, c.z, c.source, c.target);
+                });
+            });
+        }
+
+        function renderGJTab() {
+            if (gapJunctions.length === 0) {
+                gjContainer.innerHTML = '<p style="color:#888;font-size:12px;">No putative gap junctions marked yet.<br>'
+                    + 'Select an overlap or contact, navigate to the location, then click \u26a1 Mark Gap Junction.</p>';
+                return;
+            }
+            // Group by undirected pair
+            const pairMap = {};
+            gapJunctions.forEach((gj, i) => {
+                const pairKey = [gj.source, gj.target].sort().join(' \u2194 ');
+                if (!pairMap[pairKey]) pairMap[pairKey] = [];
+                pairMap[pairKey].push({ ...gj, _i: i });
+            });
+            let html = '<p style="color:#ccc;font-size:11px;margin:0 0 8px;">'
+                + gapJunctions.length + ' putative gap junction(s) across '
+                + Object.keys(pairMap).length + ' pair(s)</p>';
+            html += '<table class="gj-table"><thead><tr>'
+                + '<th>#</th><th>Pair</th><th>X (nm)</th><th>Y (nm)</th><th>Z (nm)</th>'
+                + '<th>Type</th><th>Idx</th><th>Z-off</th><th></th>'
+                + '</tr></thead><tbody>';
+            gapJunctions.forEach((gj, i) => {
+                html += '<tr class="gj-row" data-gji="' + i + '" style="cursor:pointer;" title="Click to navigate to this GJ">'
+                    + '<td>' + (i + 1) + '</td>'
+                    + '<td>' + gj.source + ' \u2194 ' + gj.target + '</td>'
+                    + '<td>' + Math.round(gj.x) + '</td>'
+                    + '<td>' + Math.round(gj.y) + '</td>'
+                    + '<td>' + Math.round(gj.z) + '</td>'
+                    + '<td>' + gj.kind + '</td>'
+                    + '<td>' + gj.idx + '</td>'
+                    + '<td>' + gj.zOffset + '</td>'
+                    + '<td class="gj-delete" data-gji="' + i + '" title="Remove this gap junction">\u2716</td>'
+                    + '</tr>';
+            });
+            html += '</tbody></table>';
+
+            // Pair summary
+            html += '<h4 style="color:#39FF14;margin:12px 0 6px;">Pairs with Gap Junctions</h4>';
+            html += '<table class="gj-table"><thead><tr>'
+                + '<th>Pair</th><th>Count</th><th>Locations</th>'
+                + '</tr></thead><tbody>';
+            Object.keys(pairMap).sort().forEach(pair => {
+                const entries = pairMap[pair];
+                const locs = entries.map(g =>
+                    '(' + Math.round(g.x) + ', ' + Math.round(g.y) + ', ' + Math.round(g.z) + ')'
+                ).join(', ');
+                html += '<tr><td>' + pair + '</td><td>' + entries.length + '</td>'
+                    + '<td style="font-size:9px;">' + locs + '</td></tr>';
+            });
+            html += '</tbody></table>';
+
+            gjContainer.innerHTML = html;
+            // Wire up row clicks — navigate to GJ location
+            gjContainer.querySelectorAll('.gj-row').forEach(row => {
+                row.addEventListener('click', function(e) {
+                    if (e.target.classList.contains('gj-delete')) return; // let delete handle it
+                    const idx = parseInt(this.dataset.gji);
+                    const gj = gapJunctions[idx];
+                    if (gj) {
+                        matrixModal.classList.remove('active');
+                        navigateToGJ(gj);
+                    }
+                });
+            });
+            // Wire up delete buttons
+            gjContainer.querySelectorAll('.gj-delete').forEach(btn => {
+                btn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const idx = parseInt(this.dataset.gji);
+                    gapJunctions.splice(idx, 1);
+                    updateGJTrace();
+                    renderGJTab();
                 });
             });
         }
@@ -1403,13 +1714,23 @@ def load_overlap_vertices(results_dir):
             z_lo = meta.get('z_lo', -20)
             z_hi = meta.get('z_hi', 20)
             valid_z = meta.get('valid_z', [])
+            slice_detail = meta.get('slice_detail', [])
+            area_um2 = meta.get('total_area_um2', 0)
+            n_slices = meta.get('n_slices', len(valid_z) or 1)
             for neuron, other in [(na, nb), (nb, na)]:
                 per_pair.setdefault(neuron, []).append({
                     'other': other,
                     'x': mx.tolist(), 'y': my.tolist(), 'z': mz.tolist(),
                     'idx': em_idx, 'z_lo': z_lo, 'z_hi': z_hi,
                     'valid_z': valid_z,
+                    'slice_detail': slice_detail,
+                    'area_um2': area_um2,
+                    'orig_n_slices': n_slices,
                     'source': na, 'target': nb,
+                    'meta_x': meta.get('x', None),
+                    'meta_y': meta.get('y', None),
+                    'meta_z': meta.get('z', None),
+                    'z_base_nm': meta.get('z_base_nm', None),
                 })
         else:
             # Multiple sub-clusters — assign each vertex to nearest centroid
@@ -1437,7 +1758,14 @@ def load_overlap_vertices(results_dir):
                         'z_lo': meta.get('z_lo', -20),
                         'z_hi': meta.get('z_hi', 20),
                         'valid_z': meta.get('valid_z', []),
+                        'slice_detail': meta.get('slice_detail', []),
+                        'area_um2': meta.get('total_area_um2', 0),
+                        'orig_n_slices': meta.get('n_slices', len(meta.get('valid_z', [])) or 1),
                         'source': na, 'target': nb,
+                        'meta_x': meta.get('x', None),
+                        'meta_y': meta.get('y', None),
+                        'meta_z': meta.get('z', None),
+                        'z_base_nm': meta.get('z_base_nm', None),
                     })
 
     total = sum(len(v['x']) for v in per_neuron.values())
@@ -1836,6 +2164,21 @@ def build_figure(mesh_dir):
     ))
     print(f"  [pos_indicator] 3D position marker trace added")
 
+    # ── 7. Gap-junction markers (empty, JS fills) ───────────────
+    trace_info['_gap_junctions'] = len(traces)
+    traces.append(go.Scatter3d(
+        x=[], y=[], z=[],
+        mode='markers',
+        name='_gap_junctions',
+        visible=True,
+        marker=dict(size=4, color='#39FF14', symbol='circle',
+                    opacity=0.9),
+        hovertemplate='Gap junction<br>%{text}<extra></extra>',
+        text=[],
+        showlegend=False
+    ))
+    print(f"  [gap_junctions] marker trace added")
+
     fig = go.Figure(data=traces)
     fig.update_layout(
         scene=dict(
@@ -1991,17 +2334,38 @@ def generate_html(fig, contacts, synapses, trace_info,
             ov_idx = p.get('idx', -1)
             if ov_idx >= 0 and ov_idx not in seen_overlap_idxs:
                 seen_overlap_idxs.add(ov_idx)
-                cx = sum(p['x']) / len(p['x']) if p['x'] else 0
-                cy = sum(p['y']) / len(p['y']) if p['y'] else 0
-                cz = sum(p['z']) / len(p['z']) if p['z'] else 0
+                # Build per-slice coordinate lookup from slice_detail.
+                # Each EM slice was downloaded at its own (cx, cy) center,
+                # so the diamond must track that position per Z-offset.
+                sd_list = p.get('slice_detail', [])
+                slice_coords = {}
+                for sd in sd_list:
+                    zo = sd.get('z_offset')
+                    if zo is not None and 'cx' in sd and 'cy' in sd:
+                        slice_coords[str(zo)] = [round(sd['cx'], 1), round(sd['cy'], 1)]
+                # z_base_nm = absolute Z (nm) of the first EM slice (z_offset=0).
+                # This replaces meta_z as the base for Z-offset calculations.
+                z_base = p.get('z_base_nm')
+                if z_base is None:
+                    # Fallback: use meta_z (less accurate)
+                    meta_z = p.get('meta_z')
+                    z_base = meta_z if meta_z is not None else (
+                        sum(p['z']) / len(p['z']) if p['z'] else 0)
                 overlap_list.append({
                     'idx': ov_idx,
-                    'x': cx, 'y': cy, 'z': cz,
+                    'x': slice_coords.get('0', [0, 0])[0] if slice_coords else (
+                        sum(p['x']) / len(p['x']) if p['x'] else 0),
+                    'y': slice_coords.get('0', [0, 0])[1] if slice_coords else (
+                        sum(p['y']) / len(p['y']) if p['y'] else 0),
+                    'z': z_base,
                     'source': p.get('source', ''),
                     'target': p.get('target', ''),
                     'z_lo': p.get('z_lo', -20),
                     'z_hi': p.get('z_hi', 20),
                     'valid_z': p.get('valid_z', []),
+                    'area_um2': p.get('area_um2', 0),
+                    'orig_n_slices': p.get('orig_n_slices', len(p.get('valid_z', [])) or 1),
+                    'slice_coords': slice_coords,
                 })
     overlap_list.sort(key=lambda o: o['idx'])
 
