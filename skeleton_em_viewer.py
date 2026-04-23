@@ -1,20 +1,72 @@
 """
-Skeleton EM Viewer - Config-Driven Neuron Viewer
-=================================================
-Self-contained EM viewer reading neuron config from neurons.json.
+Skeleton EM Viewer
+==================
 
-Features:
-- Left sidebar: Neuron controls (mesh / all contacts / curr contacts / overlaps / synapses)
-- Center top: 3D point-cloud viewer with contact/synapse/overlap highlighting
-- Center bottom: Overlap summary table (live-updating)
-- Right: EM snapshot viewer with Z-stack navigation + delete contact button
-- Delete button removes contact from viewer + marks it; table updates in real-time
+A self-contained, interactive 3D viewer for electron-microscopy (EM) circuit
+reconstruction data.  One Python run produces a single, standalone HTML file
+that embeds all data, Plotly, and JavaScript — no server required.
 
-Usage:
-    python skeleton_em_viewer.py
+STANDALONE USAGE
+----------------
+Run from the project root (where neurons.json lives)::
 
-Output:
-    comprehensive_overlap_results_<date>/skeleton_em_viewer.html
+        python skeleton_em_viewer.py
+
+The output file is written to::
+
+        <latest comprehensive_overlap_results_*>/skeleton_em_viewer.html
+
+Override the results directory with an environment variable::
+
+        set MESH_RESULTS_DIR=C:\\path\\to\\my_results
+        python skeleton_em_viewer.py
+
+REQUIRED INPUTS (inside RESULTS_DIR)
+--------------------------------------
+* ``all_results_combined.csv``       — contact-patch table (Has_Contact rows)
+* ``synapses.csv``                   — chemical synapse coordinates
+* ``geometric_data/contact_vertices.csv``  — overlap-region midpoints
+* ``geometric_data/contact_faces.csv``     — overlap triangle meshes (optional)
+* ``overlap_em_meta.json``           — EM snapshot metadata per pair (optional)
+* ``contact_cluster_map.json``       — patch→cluster mapping (optional)
+* ``neuron_meshes/<id>.obj``         — neuron surface meshes (optional)
+* ``em_snaps/``                      — PNG snapshots at each contact/overlap
+
+CONFIGURATION (neurons.json)
+------------------------------
+All neuron identities, colors, synapse groups, and pipeline parameters are
+read from ``neurons.json`` in the same directory as this script.  Keys used:
+
+* ``neurons``          — dict of name → {id, color_hex, group, ...}
+* ``viewer_neurons``   — ordered list of neuron names to show in the sidebar
+* ``synapse_groups``   — set of group names whose synapses are loaded
+* ``top_patches``      — how many Top-N patch columns to read (default 10)
+* ``face_decimation_nm``  — vertex merging distance for mesh decimation (default 80)
+
+VIEWER FEATURES
+---------------
+* 3D Plotly viewer — meshes, contacts (red), synapses (yellow/blue), overlaps
+* EM panel — click any 3D point to open its EM snapshot; navigate Z-stack
+* Deletion workflow — flag spurious contacts/overlap slices; export JSON audit log
+* Gap-junction annotation — mark putative GJ sites and export for post-processing
+* Heatmap matrix — 4-panel overlap-area matrix (full / L-R mean / group / bidir)
+* Tier 1 circuit model — single-compartment HH simulation of LPTC–MN circuit
+* Tier 2 circuit model — multi-compartment simulation with axial coupling
+
+ARCHITECTURE
+------------
+Python side (this file):
+    load_*()        — data loaders, each reading one CSV / JSON source
+    build_figure()  — constructs the Plotly figure with all trace types
+    generate_html() — template substitution, serialises all data to JSON
+    main()          — orchestrates the above and writes the output file
+
+JavaScript (embedded in HTML_TEMPLATE):
+    State + 3D viewer interaction (~700 lines)
+    EM viewer + Z-stack navigation + deletion (~400 lines)
+    Heatmap modal + connectivity matrix (~400 lines)
+    Tier 1 biophysical circuit model (~600 lines)
+    Tier 2 multi-compartment model (~600 lines)
 """
 
 import os
@@ -30,16 +82,40 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(SCRIPT_DIR, 'neurons.json'), 'r') as f:
     _cfg = json.load(f)
 
-NEURON_CFG     = _cfg['neurons']
-NEURON_IDS     = {info['id']: name for name, info in NEURON_CFG.items()}
-NEURON_COLORS  = {name: info['color_hex'] for name, info in NEURON_CFG.items()}
+NEURON_CFG = _cfg['neurons']
+NEURON_IDS = {info['id']: name for name, info in NEURON_CFG.items()}
+NEURON_COLORS = {name: info['color_hex'] for name, info in NEURON_CFG.items()}
 VIEWER_NEURONS = _cfg.get('viewer_neurons', sorted(NEURON_CFG.keys()))
 
 _synapse_groups = set(_cfg.get('synapse_groups', []))
 SYNAPSE_NEURONS = [n for n, info in NEURON_CFG.items() if info['group'] in _synapse_groups]
 
+# Inhibitory pairs used for synapse color/label classification.
+INH_PAIRS = frozenset([
+    ('VS1_L', 'VS2_L'),
+    ('VS1_R', 'VS2_R'),
+    ('VS1_R', 'VS3_R'),
+    ('VS2_L', 'VS3_L'),
+    ('VS3_L', 'VS4_L'),
+    ('BIPS_L', 'HSN_L'),
+    ('BIPS_L', 'HSE_L'),
+    ('BIPS_R', 'HSN_R'),
+    ('BIPS_R', 'HSE_R'),
+    ('BIPS_R', 'HSS_L'),
+    ('BIPS_R', 'BIPS_L'),
+])
+
 
 def _default_results_dir():
+    """Find the most recent results directory created by the analysis pipeline.
+
+    Searches SCRIPT_DIR for directories matching
+    ``comprehensive_overlap_results_*`` and returns the lexicographically latest
+    (i.e. most recently timestamped) one.  Falls back to a bare
+    ``comprehensive_overlap_results`` name if none exist.
+
+    Override at runtime with environment variable ``MESH_RESULTS_DIR``.
+    """
     candidates = [d for d in os.listdir(SCRIPT_DIR)
                   if os.path.isdir(os.path.join(SCRIPT_DIR, d))
                   and d.startswith('comprehensive_overlap_results_')]
@@ -303,7 +379,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     <span id="zNote" style="color: #888; font-size: 10px;">&#177;800nm depth range</span>
                     <button id="btnDeleteSlice" title="Remove this single slice (contact or overlap Z-slice)">&#128465; Delete Slice</button>
                     <button id="btnDeleteAll" title="Remove entire overlap pair (all slices)">&#128465; Delete All</button>
-                    <button id="btnMarkGJ" title="Mark current location as putative gap junction">&#9889; Mark Gap Junction</button>
+                    <button id="btnMarkGJ" title="Mark current location as putative gap junction">&#9889; Putative Gap-Junc</button>
                     <button id="btnRemoveGJ" title="Remove gap junction at current location" style="display:none;">&#10006; Remove GJ</button>
                     <button id="btnMatrix" title="Show overlap area heatmap matrix" style="background:#1565C0;border-color:#42A5F5;">&#9638; Matrix</button>
                     <button id="btnExport" title="Export list of deleted contacts">&#128190; Export</button>
@@ -321,10 +397,48 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 <div class="modal-tab active" data-tab="overlaps">Overlap Areas</div>
                 <div class="modal-tab" data-tab="gapjunctions">Gap Junctions</div>
                 <div class="modal-tab" data-tab="connectivity">Connectivity</div>
-                <div class="modal-tab" data-tab="circuit">Circuit Model</div>
+                <div class="modal-tab" data-tab="circuit">Circuit Model (Tier 1)</div>
+                <div class="modal-tab" data-tab="mc">Multi-Compartment (Tier 2)</div>
             </div>
             <div class="modal-tab-content active" id="tabOverlaps">
-                <div class="heatmap-container" id="heatmapContainer"></div>
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    <div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                            <b style="color:#FFD400;font-size:11px;">Full Matrix (all 22 neurons)</b>
+                            <input type="range" id="heatSliderFull" min="0.1" max="100" value="100" step="0.1"
+                                   style="width:140px;" title="Adjust max heat intensity">
+                            <span id="heatSliderFullVal" style="color:#aaa;font-size:10px;min-width:60px;">max: 100%</span>
+                        </div>
+                        <div class="heatmap-container" id="heatmapContainer"></div>
+                    </div>
+                    <div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                            <b style="color:#FFD400;font-size:11px;">L/R Pair Mean</b>
+                            <input type="range" id="heatSliderPair" min="0.1" max="100" value="100" step="0.1"
+                                   style="width:140px;" title="Adjust max heat intensity">
+                            <span id="heatSliderPairVal" style="color:#aaa;font-size:10px;min-width:60px;">max: 100%</span>
+                        </div>
+                        <div class="heatmap-container" id="heatmapPairContainer"></div>
+                    </div>
+                    <div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                            <b style="color:#FFD400;font-size:11px;">Group Mean (L+R collapsed)</b>
+                            <input type="range" id="heatSliderGroup" min="0.1" max="100" value="100" step="0.1"
+                                   style="width:140px;" title="Adjust max heat intensity">
+                            <span id="heatSliderGroupVal" style="color:#aaa;font-size:10px;min-width:60px;">max: 100%</span>
+                        </div>
+                        <div class="heatmap-container" id="heatmapGroupContainer"></div>
+                    </div>
+                    <div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                            <b style="color:#FFD400;font-size:11px;">MOS / MOT Bidirectional Mean</b>
+                            <input type="range" id="heatSliderBidir" min="0.1" max="100" value="100" step="0.1"
+                                   style="width:140px;" title="Adjust max heat intensity">
+                            <span id="heatSliderBidirVal" style="color:#aaa;font-size:10px;min-width:60px;">max: 100%</span>
+                        </div>
+                        <div class="heatmap-container" id="heatmapBidirContainer"></div>
+                    </div>
+                </div>
             </div>
             <div class="modal-tab-content" id="tabGapJunctions">
                 <div id="gjContainer" style="padding:8px;"></div>
@@ -335,11 +449,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <div class="modal-tab-content" id="tabCircuit">
                 <div id="circuitContainer" style="padding:8px;"></div>
             </div>
+            <div class="modal-tab-content" id="tabMC">
+                <div id="mcContainer" style="padding:8px;"></div>
+            </div>
         </div>
     </div>
 
     <script>
-        // ── Embedded data ───────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────
+        // EMBEDDED DATA
+        // All data is serialised by generate_html() at build time and injected
+        // as JSON literals into these constants.  Nothing is fetched at runtime
+        // except the em_snaps/*.png images (relative paths).
+        // ─────────────────────────────────────────────────────────────────────
         const snapshotMap   = {SNAPSHOT_JSON};
         const contactClusterMap = {CLUSTER_MAP_JSON};
         const neuronNames   = {NEURON_NAMES_JSON};
@@ -350,6 +472,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         let   overlapTable  = {OVERLAP_TABLE_JSON};
         const overlapPairs  = {OVERLAP_PAIRS_JSON};
         const overlapPairFaces = {OVERLAP_PAIR_FACES_JSON};
+        const neuronColors  = {NEURON_COLORS_JSON};
         const deletedItems = [];  // track deleted contacts + overlap slices
 
         // ── DOM refs ────────────────────────────────────────────────
@@ -396,6 +519,62 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const gapJunctions = [];  // [{x, y, z, source, target, kind, idx, zOffset, timestamp}]
         let gjTraceIdx = traceInfo['_gap_junctions'];
 
+        // ── Pre-populate gap junctions from overlap data ────────────
+        // ─────────────────────────────────────────────────────────────────────
+        // GAP-JUNCTION PRE-POPULATION
+        // Seeds the gapJunctions array with anatomically known GJ pairs based on
+        // electrophysiology and the Tier 2 circuit model.  For each known pair
+        // the biggest overlap region (by area) is used as the GJ centroid.
+        // Users can add/remove further sites interactively.
+        //   LPTC chain (axo-axonal): VS1↔VS2↔VS3↔VS4, HSN↔HSE↔HSS
+        //   LPTC↔MN (axon↔dendrite): VS/HS → MOS,  HS → MOT
+        // ─────────────────────────────────────────────────────────────────────
+        (function prePopulateGJs() {
+            const knownGJPairs = [];
+            ['L','R'].forEach(s => {
+                // VS chain (axo-axonal)
+                for (let k = 1; k <= 3; k++)
+                    knownGJPairs.push({a:'VS'+k+'_'+s, b:'VS'+(k+1)+'_'+s, type:'axo-axonal (LPTC chain)'});
+                // HS chain (axo-axonal)
+                knownGJPairs.push({a:'HSN_'+s, b:'HSE_'+s, type:'axo-axonal (LPTC chain)'});
+                knownGJPairs.push({a:'HSE_'+s, b:'HSS_'+s, type:'axo-axonal (LPTC chain)'});
+                // VS ↔ MOS (LPTC axon ↔ MN dendrite)
+                for (let k = 1; k <= 4; k++)
+                    knownGJPairs.push({a:'VS'+k+'_'+s, b:'MOS_'+s, type:'axon\u2194dendrite (LPTC\u2194MN)'});
+                // HS ↔ MOS (LPTC axon ↔ MN dendrite)
+                ['HSN','HSE','HSS'].forEach(h => {
+                    knownGJPairs.push({a:h+'_'+s, b:'MOS_'+s, type:'axon\u2194dendrite (LPTC\u2194MN)'});
+                });
+                // HS ↔ MOT (LPTC axon ↔ MN dendrite)
+                ['HSN','HSE','HSS'].forEach(h => {
+                    knownGJPairs.push({a:h+'_'+s, b:'MOT_'+s, type:'axon\u2194dendrite (LPTC\u2194MN)'});
+                });
+            });
+
+            // For each known GJ pair, find the biggest overlap region
+            knownGJPairs.forEach(pair => {
+                // Search overlapList for matching pair (either direction)
+                const matches = overlapList.filter(ov =>
+                    (ov.source === pair.a && ov.target === pair.b) ||
+                    (ov.source === pair.b && ov.target === pair.a));
+                if (matches.length === 0) return;
+                // Pick the one with biggest area
+                let best = matches[0];
+                matches.forEach(m => { if (m.area_um2 > best.area_um2) best = m; });
+                // Place GJ at center of that overlap
+                gapJunctions.push({
+                    x: best.x, y: best.y, z: best.z,
+                    source: pair.a, target: pair.b,
+                    kind: pair.type,
+                    idx: best.idx,
+                    zOffset: 0,
+                    timestamp: 'preset',
+                });
+            });
+            if (gapJunctions.length > 0)
+                console.log('[GJ] Pre-populated ' + gapJunctions.length + ' gap junctions from overlap data');
+        })();
+
         // ── WebGL context loss recovery ─────────────────────────────
         plotDiv.addEventListener('webglcontextlost', function(e) {
             console.warn('WebGL context lost — will attempt recovery');
@@ -407,10 +586,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         });
 
         // ── Plotly safety — direct data mutation instead of Plotly.restyle ──
-        // Plotly.restyle on gl3d traces can hang the browser (Promise never
-        // resolves, or triggers a full scene recompute that takes minutes).
-        // Instead we mutate plotDiv.data[idx] in-place and batch a single
-        // Plotly.redraw via requestAnimationFrame.
+        // ─────────────────────────────────────────────────────────────────────
+        // PLOTLY RENDERING WORKAROUND
+        // Calling Plotly.restyle() on gl3d (WebGL) traces can hang the browser:
+        // the returned Promise never resolves, or triggers a full scene recompute
+        // that takes seconds.  Instead we mutate plotDiv.data[idx] in-place and
+        // batch a single Plotly.redraw() via requestAnimationFrame so at most one
+        // redraw fires per animation frame regardless of how many trace updates
+        // were triggered.
+        // ─────────────────────────────────────────────────────────────────────
         let redrawScheduled = false;
         function scheduleRedraw() {
             if (redrawScheduled) return;
@@ -421,6 +605,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 catch(e) { console.warn('redraw error:', e.message); }
             });
         }
+        function _setNested(obj, key, value) {
+            // Handle dot-notation keys like 'marker.color' → obj.marker.color
+            const parts = key.split('.');
+            for (let k = 0; k < parts.length - 1; k++) {
+                if (obj[parts[k]] === undefined) obj[parts[k]] = {};
+                obj = obj[parts[k]];
+            }
+            obj[parts[parts.length - 1]] = value;
+        }
         function safeRestyle(div, update, indices) {
             // Mutate trace data in-place, then schedule a single redraw
             try {
@@ -430,13 +623,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     if (!trace) return;
                     for (const key in update) {
                         const val = update[key];
+                        let v;
                         if (Array.isArray(val) && val.length === idxArr.length) {
-                            trace[key] = val[i];
+                            v = val[i];
                         } else if (Array.isArray(val) && val.length === 1 && idxArr.length === 1) {
-                            trace[key] = val[0];
+                            v = val[0];
                         } else {
-                            trace[key] = val;
+                            v = val;
                         }
+                        _setNested(trace, key, v);
                     }
                 });
                 scheduleRedraw();
@@ -445,6 +640,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         function safeRelayout(div, update) {
             try { Plotly.relayout(div, update); }
             catch(e) { console.warn('relayout error:', e.message); }
+        }
+
+        // ── Utility: debounce ───────────────────────────────────────────────
+        // Returns a wrapper that delays invoking *fn* until *wait* ms after the
+        // last call.  Used to collapse rapid-fire checkbox cascades and slider
+        // drags into a single render pass, avoiding redundant full-scene redraws.
+        function debounce(fn, wait) {
+            let timer = null;
+            return function() {
+                const ctx = this, args = arguments;
+                clearTimeout(timer);
+                timer = setTimeout(function() { timer = null; fn.apply(ctx, args); }, wait);
+            };
         }
 
         plotDiv.addEventListener('mousedown', e => {
@@ -480,14 +688,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                             return involves && mv.includes(other) && !it._eliminated;
                         }).forEach(it => { if (it.idx >= 0) seen.add(it.idx); });
                     }
-                    // Also include from overlap face checkboxes
-                    ['alloverlapfaces_','curroverlapfaces_'].forEach(pre => {
-                        const cb2 = document.getElementById(pre + neuron);
-                        if (cb2 && cb2.checked) {
-                            itemList.filter(it => (it.source === neuron || it.target === neuron) && !it._eliminated)
-                                    .forEach(it => { if (it.idx >= 0) seen.add(it.idx); });
-                        }
-                    });
+                    // Putative GJ checkboxes are handled in gap-junction rendering only.
                 } else {
                     const allCb = document.getElementById('all' + kind + 's_' + neuron);
                     if (allCb && allCb.checked) {
@@ -540,15 +741,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 });
             }
             const show = filtered.length > 0 && (allOn || curOn);
-            safeRestyle(plotDiv, {
+            const restyleObj = {
                 x: [filtered.map(d => d.x)],
                 y: [filtered.map(d => d.y)],
                 z: [filtered.map(d => d.z)],
                 visible: [show],
                 customdata: [filtered.map(d => [d.x, d.y, d.z,
                     kind === 'contacts' ? 'contact' : 'synapse',
-                    d.source, d.target, d.idx, d.patch_num || 0])]
-            }, [traceIdx]);
+                    d.source, d.target, d.idx,
+                    kind === 'contacts' ? (d.patch_num || 0)
+                        : (d.isInh ? 'Inhibitory (GABA)' : 'Excitatory (ACh/Glut)')])]
+            };
+            if (kind === 'synapses') {
+                restyleObj['marker.color'] = [filtered.map(d =>
+                    d.isInh ? '#4488ff' : 'yellow')];
+            }
+            safeRestyle(plotDiv, restyleObj, [traceIdx]);
         }
         function recalcAllCurrentTraces() {
             neuronNames.forEach(n => {
@@ -619,97 +827,105 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             });
         }
 
-        // ── Overlap FACE trace toggle (Mesh3d surfaces) ──────────────
-        function rebuildAllOverlapFacesTrace(neuron) {
-            const cb = document.getElementById('alloverlapfaces_' + neuron);
-            const traceIdx = traceInfo[neuron + '_alloverlapfaces'];
-            if (traceIdx === undefined) return;
-            if (!cb || !cb.checked) {
-                safeRestyle(plotDiv, { visible: [false] }, [traceIdx]);
-                return;
-            }
-            // Rebuild from pair faces data, filtering eliminated
-            const pairs = overlapPairFaces[neuron] || [];
-            const xs = [], ys = [], zs = [];
-            const ii = [], jj = [], kk = [];
-            let vertOffset = 0;
-            pairs.forEach(p => {
-                const pairOv = overlapList.find(o =>
-                    (o.source === p.source && o.target === p.target) ||
-                    (o.source === p.target && o.target === p.source));
-                if (pairOv && pairOv._eliminated) return;
-                for (let v = 0; v < p.x.length; v++) {
-                    xs.push(p.x[v]); ys.push(p.y[v]); zs.push(p.z[v]);
-                }
-                for (let f = 0; f < p.i.length; f++) {
-                    ii.push(p.i[f] + vertOffset);
-                    jj.push(p.j[f] + vertOffset);
-                    kk.push(p.k[f] + vertOffset);
-                }
-                vertOffset += p.x.length;
+        // ── Putative GJ filtering (reusing overlap-face checkboxes) ──────────────
+        function _isCurrentPair(gj) {
+            if (!currentSource || !currentTarget) return false;
+            return (gj.source === currentSource && gj.target === currentTarget)
+                || (gj.source === currentTarget && gj.target === currentSource);
+        }
+        function _hideOverlapFaceTraces() {
+            neuronNames.forEach(n => {
+                const allIdx = traceInfo[n + '_alloverlapfaces'];
+                const curIdx = traceInfo[n + '_curroverlapfaces'];
+                if (allIdx !== undefined) safeRestyle(plotDiv, { visible: [false] }, [allIdx]);
+                if (curIdx !== undefined) safeRestyle(plotDiv, { visible: [false] }, [curIdx]);
             });
-            safeRestyle(plotDiv, {
-                x: [xs], y: [ys], z: [zs],
-                i: [ii], j: [jj], k: [kk], visible: [xs.length > 0]
-            }, [traceIdx]);
+        }
+        function rebuildPutativeGJTrace() {
+            if (gjTraceIdx === undefined) return;
+            const allNeurons = neuronNames.filter(n => {
+                const cb = document.getElementById('alloverlapfaces_' + n);
+                return cb && cb.checked;
+            });
+            const curNeurons = neuronNames.filter(n => {
+                const cb = document.getElementById('curroverlapfaces_' + n);
+                return cb && cb.checked;
+            });
+            const anyOn = allNeurons.length > 0 || curNeurons.length > 0;
+            const allSet = new Set(allNeurons), curSet = new Set(curNeurons);
+            const xs = [], ys = [], zs = [], txt = [];
+            if (anyOn) {
+                gapJunctions.forEach((gj, i) => {
+                    const involvesAll = allSet.has(gj.source) || allSet.has(gj.target);
+                    const involvesCur = curSet.has(gj.source) || curSet.has(gj.target);
+                    const include = involvesAll || (involvesCur && _isCurrentPair(gj));
+                    if (!include) return;
+                    xs.push(gj.x); ys.push(gj.y); zs.push(gj.z);
+                    txt.push('GJ #' + (i + 1) + ': ' + gj.source + ' ↔ ' + gj.target);
+                });
+            }
+            const tr = plotDiv.data[gjTraceIdx];
+            if (!tr) return;
+            tr.x = xs; tr.y = ys; tr.z = zs; tr.text = txt;
+            tr.visible = anyOn && xs.length > 0;
+            _hideOverlapFaceTraces();
+            scheduleRedraw();
+        }
+        function rebuildAllOverlapFacesTrace(neuron) {
+            rebuildPutativeGJTrace();
         }
         function rebuildCurrOverlapFacesTrace(neuron) {
-            const cb = document.getElementById('curroverlapfaces_' + neuron);
-            const traceIdx = traceInfo[neuron + '_curroverlapfaces'];
-            if (traceIdx === undefined) return;
-            if (!cb || !cb.checked) {
-                safeRestyle(plotDiv, { visible: [false] }, [traceIdx]);
-                return;
-            }
-            const mv = getVisibleNeurons();
-            const pairs = overlapPairFaces[neuron] || [];
-            const xs = [], ys = [], zs = [];
-            const ii = [], jj = [], kk = [];
-            let vertOffset = 0;
-            pairs.forEach(p => {
-                // Skip eliminated overlap pairs
-                const pairOv = overlapList.find(o =>
-                    (o.source === p.source && o.target === p.target) ||
-                    (o.source === p.target && o.target === p.source));
-                if (pairOv && pairOv._eliminated) return;
-                if (mv.includes(p.other)) {
-                    for (let v = 0; v < p.x.length; v++) {
-                        xs.push(p.x[v]); ys.push(p.y[v]); zs.push(p.z[v]);
-                    }
-                    for (let f = 0; f < p.i.length; f++) {
-                        ii.push(p.i[f] + vertOffset);
-                        jj.push(p.j[f] + vertOffset);
-                        kk.push(p.k[f] + vertOffset);
-                    }
-                    vertOffset += p.x.length;
-                }
-            });
-            safeRestyle(plotDiv, {
-                x: [xs], y: [ys], z: [zs],
-                i: [ii], j: [jj], k: [kk], visible: [xs.length > 0]
-            }, [traceIdx]);
+            rebuildPutativeGJTrace();
         }
         function recalcAllCurrOverlapFaces() {
-            neuronNames.forEach(n => {
-                const cb = document.getElementById('curroverlapfaces_' + n);
-                if (cb && cb.checked) rebuildCurrOverlapFacesTrace(n);
-            });
+            rebuildPutativeGJTrace();
         }
 
         // ── Checkbox handlers ───────────────────────────────────────
+        // Debounced wrappers for the three "rebuild every neuron" aggregates.
+        // When the user rapidly toggles several checkboxes (e.g. "All Meshes"),
+        // each individual change fires immediately for its own trace, but the
+        // expensive full-scene recalculation is collapsed into one call 60 ms
+        // after the burst ends.
+        const _dRecalcCurrentTraces  = debounce(recalcAllCurrentTraces,  60);
+        const _dRecalcCurrOverlaps   = debounce(recalcAllCurrOverlaps,   60);
+        const _dRecalcCurrOvFaces    = debounce(recalcAllCurrOverlapFaces, 60);
+
         neuronNames.forEach(neuron => {
             const meshCb = document.getElementById('mesh_' + neuron);
             if (meshCb) meshCb.addEventListener('change', function() {
                 const idx = traceInfo[neuron + '_mesh'];
                 if (idx !== undefined)
                     safeRestyle(plotDiv, {visible: [this.checked]}, [idx]);
-                recalcAllCurrentTraces();
-                recalcAllCurrOverlaps();
-                recalcAllCurrOverlapFaces();
+                // Defer the expensive "rebuild all neurons" passes so rapid
+                // checkbox cascades coalesce into one redraw.
+                _dRecalcCurrentTraces();
+                _dRecalcCurrOverlaps();
+                _dRecalcCurrOvFaces();
             });
             ['contacts', 'synapses'].forEach(kind => {
                 const allCb = document.getElementById('all' + kind + '_' + neuron);
-                if (allCb) allCb.addEventListener('change', () => rebuildTraceData(neuron, kind));
+                if (allCb) allCb.addEventListener('change', function() {
+                    rebuildTraceData(neuron, kind);
+                    // When checked, populate EM viewer with only this neuron's items
+                    if (this.checked && kind === 'contacts') {
+                        const items = contactList.filter(
+                            c => c.source === neuron || c.target === neuron);
+                        if (items.length > 0) {
+                            currentKind = 'contact';
+                            currentList = items.map(c => c.idx);
+                            currentListIndex = 0;
+                            const first = items[0];
+                            selectItem('contact', first.idx, first.x, first.y, first.z,
+                                       first.source, first.target);
+                            // Override currentList to only this neuron's contacts
+                            currentList = items.map(c => c.idx);
+                            currentListIndex = 0;
+                            itemInfo.textContent = 'Contact 1/' + currentList.length
+                                + ' (idx: ' + first.idx + ')  [' + neuron + ']';
+                        }
+                    }
+                });
                 const curCb = document.getElementById('cur' + kind + '_' + neuron);
                 if (curCb) curCb.addEventListener('change', () => rebuildTraceData(neuron, kind));
             });
@@ -735,6 +951,50 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 'scene.yaxis.showticklabels': s,
                 'scene.zaxis.showticklabels': s
             });
+        });
+
+        // ── Bulk-load buttons ──────────────────────────────────────
+        function _bulkToggle(cbPrefix, rebuildFn) {
+            // Check if any are currently on
+            const anyOn = neuronNames.some(n => {
+                const cb = document.getElementById(cbPrefix + n);
+                return cb && cb.checked;
+            });
+            const newState = !anyOn;
+            neuronNames.forEach(n => {
+                const cb = document.getElementById(cbPrefix + n);
+                if (cb) {
+                    cb.checked = newState;
+                    rebuildFn(n);
+                }
+            });
+        }
+        document.getElementById('btnAllMesh').addEventListener('click', function() {
+            const anyOn = neuronNames.some(n => {
+                const cb = document.getElementById('mesh_' + n);
+                return cb && cb.checked;
+            });
+            const newState = !anyOn;
+            neuronNames.forEach(n => {
+                const cb = document.getElementById('mesh_' + n);
+                if (cb) {
+                    cb.checked = newState;
+                    const idx = traceInfo[n + '_mesh'];
+                    if (idx !== undefined) safeRestyle(plotDiv, {visible: [newState]}, [idx]);
+                }
+            });
+            _dRecalcCurrentTraces();
+            _dRecalcCurrOverlaps();
+            _dRecalcCurrOvFaces();
+        });
+        document.getElementById('btnAllOverlaps').addEventListener('click', function() {
+            _bulkToggle('alloverlaps_', rebuildAllOverlapTrace);
+        });
+        document.getElementById('btnAllOvFaces').addEventListener('click', function() {
+            _bulkToggle('alloverlapfaces_', rebuildAllOverlapFacesTrace);
+        });
+        document.getElementById('btnAllSynapses').addEventListener('click', function() {
+            _bulkToggle('allsynapses_', function(n) { rebuildTraceData(n, 'synapses'); });
         });
 
         // ── 3D Position indicator ───────────────────────────────────
@@ -825,10 +1085,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         function selectItem(kind, idx, x, y, z, source, target) {
             currentKind = kind;
             currentIdx = idx;
-            currentZ = 0;
             currentSource = source;
             currentTarget = target;
-            zSlider.value = 0;
+            updateGJTrace();
             currentList = getVisibleItems(kind);
             currentListIndex = currentList.indexOf(idx);
 
@@ -845,7 +1104,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 ? 'inline-block' : 'none';
             deletedBanner.style.display = deletedIdxSet.has(kind + ':' + idx) ? 'block' : 'none';
 
-            // Dynamic Z-slider range
+            // Dynamic Z-slider range — set min/max BEFORE value
             if (kind === 'overlap') {
                 const ov = overlapList.find(o => o.idx === idx);
                 const zLo = ov ? ov.z_lo : -20;
@@ -854,12 +1113,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 zSlider.min = zLo;
                 zSlider.max = zHi;
                 zSlider.dataset.validZ = vz ? JSON.stringify(vz) : '';
+                // Snap to nearest valid Z (0 may not be in valid_z)
+                const startZ = snapToValidZ(0);
+                zSlider.value = startZ;
+                currentZ = startZ;
                 const nSlices = vz ? vz.length : (zHi - zLo + 1);
                 zNote.textContent = nSlices + ' EM slices  (Z: ' + zLo + ' to ' + zHi + ')';
             } else {
                 zSlider.min = -20;
                 zSlider.max = 20;
                 zSlider.dataset.validZ = '';
+                zSlider.value = 0;
+                currentZ = 0;
             }
 
             // Set base Z and initial diamond position
@@ -870,17 +1135,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     // ov.z = z_base_nm (absolute Z of the first EM slice)
                     curItemZnm = ov.z;
                     // Start diamond at EM-slice-0 center coords
-                    const sc0 = ov.slice_coords && ov.slice_coords['0'];
+                    const sc0 = ov.slice_coords && ov.slice_coords[String(currentZ)];
                     if (sc0) { x = sc0[0]; y = sc0[1]; }
                 }
             }
             curItemX = x; curItemY = y;
-            update3DIndicator(x, y, curItemZnm);
+            update3DIndicator(x, y, curItemZnm + currentZ * 40);
 
-            loadImage(kind, idx, 0);
+            loadImage(kind, idx, currentZ);
         }
 
         // ── Image loading ───────────────────────────────────────────
+        let _loadGen = 0;  // generation counter to prevent stale callbacks
         function loadImage(kind, idx, zOffset) {
             const imgData = snapshotMap[kind] && snapshotMap[kind][idx];
             if (!imgData) {
@@ -889,21 +1155,35 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 emPlaceholder.textContent = 'No snapshot for ' + kind + ' ' + idx;
                 return;
             }
+            const gen = ++_loadGen;
             currentZ = zOffset;  // sync so stepValidZ always sees latest offset
             if (zOffset === 0) {
+                // Clear stale handlers from previous loadZStackImage to prevent
+                // race condition where old onload resets currentZ
+                emImage.onload = null;
+                emImage.onerror = null;
                 emImage.src = imgData;
                 emImage.style.display = 'block';
                 emPlaceholder.style.display = 'none';
                 updateZValue(0);
             } else {
-                loadZStackImage(kind, idx, zOffset);
+                loadZStackImage(kind, idx, zOffset, gen);
             }
             // For overlaps: update X,Y from per-slice EM center coords
             if (kind === 'overlap') {
                 const ov = overlapList.find(o => o.idx === idx);
-                if (ov && ov.slice_coords) {
-                    const sc = ov.slice_coords[String(zOffset)];
-                    if (sc) { curItemX = sc[0]; curItemY = sc[1]; }
+                if (ov) {
+                    if (ov.slice_coords) {
+                        const sc = ov.slice_coords[String(zOffset)];
+                        if (sc) {
+                            curItemX = sc[0]; curItemY = sc[1];
+                        } else {
+                            // No per-slice coords for this z — fall back to overlap centroid
+                            curItemX = ov.x; curItemY = ov.y;
+                        }
+                    } else {
+                        curItemX = ov.x; curItemY = ov.y;
+                    }
                 }
             }
             // Update 3D diamond to match current EM slice position
@@ -914,14 +1194,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 + ' at (' + Math.round(curItemX) + ', ' + Math.round(curItemY) + ', ' + Math.round(curItemZ) + ')';
         }
 
-        function loadZStackImage(kind, idx, zOffset) {
+        function loadZStackImage(kind, idx, zOffset, gen) {
             const sign = zOffset >= 0 ? '+' : '-';
             const zStr = 'z' + sign + String(Math.abs(zOffset)).padStart(3, '0');
             emImage.onerror = function() {
+                if (gen !== _loadGen) return;  // stale callback
                 const center = snapshotMap[kind] && snapshotMap[kind][idx];
                 if (center && zOffset !== 0) emImage.src = center;
             };
             emImage.onload = function() {
+                if (gen !== _loadGen) return;  // stale callback
                 emImage.style.display = 'block';
                 emPlaceholder.style.display = 'none';
                 updateZValue(zOffset);
@@ -976,12 +1258,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 for (let i = vz.length - 1; i >= 0; i--) {
                     if (vz[i] < cur) return vz[i];
                 }
-                return cur;
+                // No valid Z below cur — if cur is not in valid_z, snap to nearest
+                if (vz.indexOf(cur) === -1) return snapToValidZ(cur);
+                return cur;  // already at lowest valid Z
             } else {
                 for (let i = 0; i < vz.length; i++) {
                     if (vz[i] > cur) return vz[i];
                 }
-                return cur;
+                // No valid Z above cur — if cur is not in valid_z, snap to nearest
+                if (vz.indexOf(cur) === -1) return snapToValidZ(cur);
+                return cur;  // already at highest valid Z
             }
         }
         function snapToValidZ(z) {
@@ -1040,6 +1326,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 curItemZnm = item.z;
                 currentSource = item.source;
                 currentTarget = item.target;
+                updateGJTrace();
             }
             itemInfo.textContent = currentKind.charAt(0).toUpperCase()
                 + currentKind.slice(1) + ' '
@@ -1050,6 +1337,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             btnDeleteAll.style.display = (currentKind === 'overlap')
                 ? 'inline-block' : 'none';
 
+            // Set slider range BEFORE value, then snap to valid Z
             if (currentKind === 'overlap') {
                 const ov = overlapList.find(o => o.idx === newIdx);
                 const zLo = ov ? ov.z_lo : -20;
@@ -1057,12 +1345,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const vz = (ov && ov.valid_z && ov.valid_z.length) ? ov.valid_z : null;
                 zSlider.min = zLo; zSlider.max = zHi;
                 zSlider.dataset.validZ = vz ? JSON.stringify(vz) : '';
+                const startZ = snapToValidZ(0);
+                zSlider.value = startZ;
+                currentZ = startZ;
+                const nSlices = vz ? vz.length : (zHi - zLo + 1);
+                zNote.textContent = nSlices + ' EM slices  (Z: ' + zLo + ' to ' + zHi + ')';
             } else {
                 zSlider.min = -20; zSlider.max = 20;
                 zSlider.dataset.validZ = '';
+                zSlider.value = 0;
+                currentZ = 0;
             }
-            currentZ = 0; zSlider.value = 0;
-            loadImage(currentKind, newIdx, 0);
+            loadImage(currentKind, newIdx, currentZ);
         }
 
         // ── Helper: update slider text after deletion ────────────
@@ -1127,9 +1421,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 rebuildAllOverlapFacesTrace(n);
                 rebuildCurrOverlapFacesTrace(n);
             });
-            // Re-render the matrix if the modal is open
+            // Invalidate cached heatmap; re-render if modal is currently open
+            _tabRendered.overlaps = false;
             if (matrixModal.classList.contains('active')) {
                 renderHeatmap();
+                _tabRendered.overlaps = true;
             }
         }
 
@@ -1166,8 +1462,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 }
                 infoText.textContent = '\u2717 Deleted contact #' + currentIdx
                     + '  [' + deletedItems.length + ' deletions]';
-                // Update matrix if open
-                if (matrixModal.classList.contains('active')) renderHeatmap();
+                // Invalidate heatmap cache and re-render if modal is open
+                _tabRendered.overlaps = false;
+                if (matrixModal.classList.contains('active')) { renderHeatmap(); _tabRendered.overlaps = true; }
 
             } else if (currentKind === 'overlap') {
                 const key = currentIdx + ':' + currentZ;
@@ -1301,6 +1598,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         });
 
         // ── Gap-junction marking ────────────────────────────────────
+        function focusPutativeGJOnCurrentPair() {
+            if (!currentSource || !currentTarget) return;
+            neuronNames.forEach(n => {
+                const allCb = document.getElementById('alloverlapfaces_' + n);
+                const curCb = document.getElementById('curroverlapfaces_' + n);
+                if (allCb) allCb.checked = false;
+                if (curCb) curCb.checked = (n === currentSource || n === currentTarget);
+            });
+        }
         btnMarkGJ.addEventListener('click', function() {
             if (currentKind === null || currentIdx === null) {
                 alert('Select an overlap, contact, or synapse first.'); return;
@@ -1317,8 +1623,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 timestamp: new Date().toISOString()
             };
             gapJunctions.push(gj);
+            focusPutativeGJOnCurrentPair();
             updateGJTrace();
             updateRemoveGJButton();
+            // Invalidate GJ + connectivity tabs so they re-render next visit
+            _tabRendered.gapjunctions = false;
+            _tabRendered.connectivity = false;
             infoText.textContent = '\u26a1 Gap junction #' + gapJunctions.length
                 + ' marked at ' + currentSource + ' \u2194 ' + currentTarget
                 + ' (' + Math.round(curItemX) + ', ' + Math.round(curItemY)
@@ -1339,6 +1649,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const removed = gapJunctions.splice(bestIdx, 1)[0];
                 updateGJTrace();
                 updateRemoveGJButton();
+                // Invalidate GJ + connectivity tabs
+                _tabRendered.gapjunctions = false;
+                _tabRendered.connectivity = false;
                 infoText.textContent = '\u2716 Removed gap junction #' + (bestIdx + 1)
                     + ' (' + removed.source + ' \u2194 ' + removed.target + ')';
             }
@@ -1360,28 +1673,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
 
         function updateGJTrace() {
-            if (gjTraceIdx === undefined) return;
-            const allX = [], allY = [], allZ = [], allText = [];
-            gapJunctions.forEach((gj, i) => {
-                allX.push(gj.x);
-                allY.push(gj.y);
-                allZ.push(gj.z);
-                allText.push('GJ #' + (i + 1) + ': ' + gj.source + ' \u2194 ' + gj.target);
-            });
-            const trace = plotDiv.data[gjTraceIdx];
-            if (trace) {
-                trace.x = allX; trace.y = allY; trace.z = allZ;
-                trace.text = allText;
-                trace.visible = allX.length > 0;
-                scheduleRedraw();
-            }
+            rebuildPutativeGJTrace();
         }
 
         // ── Matrix modal ────────────────────────────────────────────
+        // LAZY TAB RENDERING: only render a tab's content when it is first
+        // clicked (or when data changes).  The three static-data tabs
+        // (overlaps, gapjunctions, connectivity) are rendered once on first
+        // open; Tier 1 / Tier 2 circuit tabs re-render every visit because
+        // they contain live simulation state.
+        const _tabRendered = { overlaps: false, gapjunctions: false, connectivity: false };
+
         btnMatrix.addEventListener('click', function() {
-            renderHeatmap();
-            renderGJTab();
-            renderConnectivityMatrix();
+            // Always refresh the default (overlaps) tab on open; the others
+            // stay cached until explicitly clicked.
+            if (!_tabRendered.overlaps) {
+                renderHeatmap();
+                _tabRendered.overlaps = true;
+            } else {
+                // Re-render only if deletion state changed since last open
+                // (overlapTable may have been mutated by delete operations).
+                renderHeatmap();
+            }
             matrixModal.classList.add('active');
         });
         document.getElementById('matrixClose').addEventListener('click', () => {
@@ -1390,12 +1703,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         matrixModal.addEventListener('click', function(e) {
             if (e.target === matrixModal) matrixModal.classList.remove('active');
         });
-        // Tab switching
+        // Tab switching — render each tab's content on first click only
         const tabMap = {
             overlaps:     { el: 'tabOverlaps',      title: 'Overlap Area Matrix (\u00b5m\u00b2)' },
             gapjunctions: { el: 'tabGapJunctions',   title: 'Putative Gap Junctions' },
             connectivity: { el: 'tabConnectivity',   title: 'Connectivity Matrix (GJ + Chemical Synapses)' },
             circuit:      { el: 'tabCircuit',         title: 'Tier 1 Circuit Model' },
+            mc:           { el: 'tabMC',              title: 'Multi-Compartment Model (Tier 2)' },
         };
         document.querySelectorAll('.modal-tab').forEach(tab => {
             tab.addEventListener('click', function() {
@@ -1407,21 +1721,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 if (info) {
                     document.getElementById(info.el).classList.add('active');
                     modalTitle.textContent = info.title;
+                    // Lazy render: GJ and connectivity run once; circuit tabs run every visit
+                    if (target === 'gapjunctions' && !_tabRendered.gapjunctions) {
+                        renderGJTab();
+                        _tabRendered.gapjunctions = true;
+                    } else if (target === 'gapjunctions') {
+                        // Always refresh GJ tab — user may have added/removed GJs
+                        renderGJTab();
+                    }
+                    if (target === 'connectivity' && !_tabRendered.connectivity) {
+                        renderConnectivityMatrix();
+                        _tabRendered.connectivity = true;
+                    }
                     if (target === 'circuit') renderCircuitModel();
+                    if (target === 'mc') renderMCModel();
                 }
             });
         });
 
-        function renderHeatmap() {
-            const lookup = {};
-            overlapTable.forEach(row => { lookup[row.source + '|' + row.target] = row; });
-            const allNames = new Set();
-            overlapTable.forEach(r => { allNames.add(r.source); allNames.add(r.target); });
-            const names = Array.from(allNames).sort();
-            let maxArea = 0;
-            overlapTable.forEach(r => { if (r.area > maxArea) maxArea = r.area; });
-            if (maxArea === 0) maxArea = 1;
-
+        // ── Heatmap helper: build B/W table HTML ──────────────────
+        function _buildHeatTable(dataMap, names, effectiveMax) {
             let html = '<table><thead><tr><th class="corner"></th>';
             names.forEach(n => { html += '<th>' + n.replace('_', '<br>') + '</th>'; });
             html += '</tr></thead><tbody>';
@@ -1429,29 +1748,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 html += '<tr><th class="row-header" style="text-align:right;">' + src + '</th>';
                 names.forEach(tgt => {
                     if (src === tgt) { html += '<td class="diagonal">\u2014</td>'; return; }
-                    const row = lookup[src + '|' + tgt];
-                    if (!row || row.area <= 0) {
+                    const val = dataMap[src + '|' + tgt];
+                    if (val === undefined || val <= 0) {
                         html += '<td class="no-data" data-src="' + src + '" data-tgt="' + tgt + '">-</td>';
                         return;
                     }
-                    const frac = Math.min(1, row.area / maxArea);
-                    const r = Math.round(40 + 215 * frac);
-                    const g = Math.round(40 * (1 - frac));
-                    const b = Math.round(40 * (1 - frac));
-                    const style = 'background:rgb(' + r + ',' + g + ',' + b + ');color:'
-                        + (frac > 0.5 ? '#fff' : '#ddd') + ';'
-                        + (row.status === 'eliminated' ? 'text-decoration:line-through;opacity:0.4;' : '');
+                    const frac = Math.min(1, val / effectiveMax);
+                    const v = Math.round(255 * frac);  // 0=black → 255=white
+                    const fg = frac > 0.45 ? '#000' : '#ccc';
+                    const style = 'background:rgb(' + v + ',' + v + ',' + v + ');color:' + fg + ';';
                     html += '<td style="' + style + '" data-src="' + src + '" data-tgt="' + tgt
-                        + '" title="' + src + ' \u2192 ' + tgt + ': ' + row.area.toFixed(3)
-                        + ' \u00b5m\u00b2, ' + row.patches + ' patches">'
-                        + row.area.toFixed(2) + '</td>';
+                        + '" title="' + src + ' \u2192 ' + tgt + ': ' + val.toFixed(3)
+                        + ' \u00b5m\u00b2">' + val.toFixed(2) + '</td>';
                 });
                 html += '</tr>';
             });
             html += '</tbody></table>';
-            heatmapDiv.innerHTML = html;
+            return html;
+        }
 
-            heatmapDiv.querySelectorAll('td[data-src]').forEach(td => {
+        // ── Heatmap helper: attach click handlers ────────────────
+        function _attachHeatClicks(container) {
+            container.querySelectorAll('td[data-src]').forEach(td => {
                 td.addEventListener('click', () => {
                     const src = td.dataset.src, tgt = td.dataset.tgt;
                     matrixModal.classList.remove('active');
@@ -1465,10 +1783,214 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             });
         }
 
+        // ── Heatmap helper: derive pair name without L/R suffix ──
+        function _pairBase(name) {
+            // e.g. "VS1_L" → "VS1", "HSN_R" → "HSN", "BIPS_L" → "BIPS"
+            return name.replace(/_[LR]$/, '');
+        }
+
+        function renderHeatmap() {
+            // ─────────────────────────────────────────────────────────────────
+            // OVERLAP AREA HEATMAP  (4 panels)
+            // Panel 1 — Full 22×22 matrix: every neuron pair, raw area (µm²).
+            // Panel 2 — L/R pair mean: base names (e.g. VS1), L and R averaged.
+            // Panel 3 — Group mean: functional groups (VS, HS, MOT, MOS, BIPS).
+            // Panel 4 — Bidir mean: MOS & MOT rows only, mean(A→B, B→A).
+            // Each panel has its own intensity slider; moving the slider re-renders
+            // only that panel's table (not the other three).
+            // ─────────────────────────────────────────────────────────────────
+            // Build full lookup
+            const lookup = {};
+            overlapTable.forEach(row => { lookup[row.source + '|' + row.target] = row.area; });
+            const allNames = new Set();
+            overlapTable.forEach(r => { allNames.add(r.source); allNames.add(r.target); });
+            CELL_NAMES.forEach(n => allNames.add(n));
+            const names = Array.from(allNames).sort();
+            let globalMax = 0;
+            overlapTable.forEach(r => { if (r.area > globalMax) globalMax = r.area; });
+            if (globalMax === 0) globalMax = 1;
+
+            // ── Panel 1: Full matrix ────────────────────────────
+            const heatmapDiv = document.getElementById('heatmapContainer');
+            const sliderFull = document.getElementById('heatSliderFull');
+            const sliderFullVal = document.getElementById('heatSliderFullVal');
+
+            function renderFull() {
+                const pct = parseFloat(sliderFull.value);
+                const effMax = globalMax * (pct / 100);
+                sliderFullVal.textContent = 'max: ' + effMax.toFixed(2) + ' \u00b5m\u00b2';
+                heatmapDiv.innerHTML = _buildHeatTable(lookup, names, effMax);
+                _attachHeatClicks(heatmapDiv);
+            }
+            // Use .oninput assignment (not addEventListener) so that re-opening
+            // the modal replaces the handler rather than stacking a new copy.
+            sliderFull.oninput = renderFull;
+            renderFull();
+
+            // ── Panel 2: L/R pair mean ──────────────────────────
+            // For each pair (e.g. MOS_L, MOT_R) compute mean of (A_L→B_R, A_R→B_L)
+            // i.e. the pair base names, keeping _L and _R distinction
+            const pairLookup = {};
+            const pairNames = new Set();
+            // Group neuron names by base: {VS1: [VS1_L, VS1_R], ...}
+            const baseGroups = {};
+            names.forEach(n => {
+                const b = _pairBase(n);
+                if (!baseGroups[b]) baseGroups[b] = [];
+                baseGroups[b].push(n);
+            });
+            const baseNames = Object.keys(baseGroups).sort();
+            // For each base pair (src_base, tgt_base) where src != tgt,
+            // average over all L/R combinations
+            baseNames.forEach(sb => {
+                baseNames.forEach(tb => {
+                    if (sb === tb) return;
+                    const srcNeurons = baseGroups[sb];
+                    const tgtNeurons = baseGroups[tb];
+                    let sum = 0, cnt = 0;
+                    srcNeurons.forEach(s => {
+                        tgtNeurons.forEach(t => {
+                            const v = lookup[s + '|' + t];
+                            if (v !== undefined && v > 0) { sum += v; cnt++; }
+                        });
+                    });
+                    if (cnt > 0) pairLookup[sb + '|' + tb] = sum / cnt;
+                });
+            });
+            baseNames.forEach(n => pairNames.add(n));
+            let pairMax = 0;
+            Object.values(pairLookup).forEach(v => { if (v > pairMax) pairMax = v; });
+            if (pairMax === 0) pairMax = 1;
+
+            const heatPairDiv = document.getElementById('heatmapPairContainer');
+            const sliderPair = document.getElementById('heatSliderPair');
+            const sliderPairVal = document.getElementById('heatSliderPairVal');
+            const sortedBaseNames = Array.from(pairNames).sort();
+
+            function renderPair() {
+                const pct = parseFloat(sliderPair.value);
+                const effMax = pairMax * (pct / 100);
+                sliderPairVal.textContent = 'max: ' + effMax.toFixed(2) + ' \u00b5m\u00b2';
+                heatPairDiv.innerHTML = _buildHeatTable(pairLookup, sortedBaseNames, effMax);
+                _attachHeatClicks(heatPairDiv);
+            }
+            sliderPair.oninput = renderPair;
+            renderPair();
+
+            // ── Panel 3: Group mean (L+R collapsed) ─────────────
+            // Group neurons by functional group (MOT, MOS, VS1..VS4, HSN/HSE/HSS, BIPS, H2)
+            // Then average the pair means
+            function _groupName(baseName) {
+                // VS1→VS, VS2→VS, etc. ; HSN→HS, HSE→HS, HSS→HS
+                if (baseName.match(/^VS\d/)) return 'VS';
+                if (baseName.match(/^HS[NES]/)) return 'HS';
+                return baseName;  // MOT, MOS, BIPS, H2
+            }
+            const groupLookup = {};
+            const groupSet = new Set();
+            const groupBases = {};  // group → [base names]
+            baseNames.forEach(b => {
+                const g = _groupName(b);
+                groupSet.add(g);
+                if (!groupBases[g]) groupBases[g] = [];
+                groupBases[g].push(b);
+            });
+            const groupNames = Array.from(groupSet).sort();
+            groupNames.forEach(sg => {
+                groupNames.forEach(tg => {
+                    if (sg === tg) return;
+                    const srcBases = groupBases[sg];
+                    const tgtBases = groupBases[tg];
+                    let sum = 0, cnt = 0;
+                    srcBases.forEach(sb => {
+                        tgtBases.forEach(tb => {
+                            const v = pairLookup[sb + '|' + tb];
+                            if (v !== undefined && v > 0) { sum += v; cnt++; }
+                        });
+                    });
+                    if (cnt > 0) groupLookup[sg + '|' + tg] = sum / cnt;
+                });
+            });
+            let groupMax = 0;
+            Object.values(groupLookup).forEach(v => { if (v > groupMax) groupMax = v; });
+            if (groupMax === 0) groupMax = 1;
+
+            const heatGroupDiv = document.getElementById('heatmapGroupContainer');
+            const sliderGroup = document.getElementById('heatSliderGroup');
+            const sliderGroupVal = document.getElementById('heatSliderGroupVal');
+
+            function renderGroup() {
+                const pct = parseFloat(sliderGroup.value);
+                const effMax = groupMax * (pct / 100);
+                sliderGroupVal.textContent = 'max: ' + effMax.toFixed(2) + ' \u00b5m\u00b2';
+                heatGroupDiv.innerHTML = _buildHeatTable(groupLookup, groupNames, effMax);
+            }
+            sliderGroup.oninput = renderGroup;
+            renderGroup();
+
+            // ── Panel 4: MOS/MOT bidirectional mean ─────────────
+            // For each group target, compute mean(A→B, B→A) and show only MOS and MOT rows
+            const bidirRows = ['MOS', 'MOT'];
+            const bidirCols = groupNames.filter(g => g !== 'MOS' && g !== 'MOT');
+            const bidirLookup = {};
+            bidirRows.forEach(src => {
+                bidirCols.forEach(tgt => {
+                    const ab = groupLookup[src + '|' + tgt] || 0;
+                    const ba = groupLookup[tgt + '|' + src] || 0;
+                    const vals = [ab, ba].filter(v => v > 0);
+                    if (vals.length > 0) {
+                        bidirLookup[src + '|' + tgt] = vals.reduce((a, b) => a + b, 0) / vals.length;
+                    }
+                });
+            });
+            let bidirMax = 0;
+            Object.values(bidirLookup).forEach(v => { if (v > bidirMax) bidirMax = v; });
+            if (bidirMax === 0) bidirMax = 1;
+
+            const heatBidirDiv = document.getElementById('heatmapBidirContainer');
+            const sliderBidir = document.getElementById('heatSliderBidir');
+            const sliderBidirVal = document.getElementById('heatSliderBidirVal');
+
+            function _buildBidirTable(dataMap, rowNames, colNames, effectiveMax) {
+                let html = '<table><thead><tr><th class="corner"></th>';
+                colNames.forEach(n => { html += '<th>' + n + '</th>'; });
+                html += '</tr></thead><tbody>';
+                rowNames.forEach(src => {
+                    html += '<tr><th class="row-header" style="text-align:right;">' + src + '</th>';
+                    colNames.forEach(tgt => {
+                        const val = dataMap[src + '|' + tgt];
+                        if (val === undefined || val <= 0) {
+                            html += '<td class="no-data" data-src="' + src + '" data-tgt="' + tgt + '">-</td>';
+                            return;
+                        }
+                        const frac = Math.min(1, val / effectiveMax);
+                        const v = Math.round(255 * frac);
+                        const fg = frac > 0.45 ? '#000' : '#ccc';
+                        const style = 'background:rgb(' + v + ',' + v + ',' + v + ');color:' + fg + ';';
+                        html += '<td style="' + style + '" data-src="' + src + '" data-tgt="' + tgt
+                            + '" title="' + src + ' \u2194 ' + tgt + ' (mean): ' + val.toFixed(3)
+                            + ' \u00b5m\u00b2">' + val.toFixed(2) + '</td>';
+                    });
+                    html += '</tr>';
+                });
+                html += '</tbody></table>';
+                return html;
+            }
+
+            function renderBidir() {
+                const pct = parseFloat(sliderBidir.value);
+                const effMax = bidirMax * (pct / 100);
+                sliderBidirVal.textContent = 'max: ' + effMax.toFixed(2) + ' \u00b5m\u00b2';
+                heatBidirDiv.innerHTML = _buildBidirTable(bidirLookup, bidirRows, bidirCols, effMax);
+            }
+            sliderBidir.oninput = renderBidir;
+            renderBidir();
+        }
+
         function renderGJTab() {
             if (gapJunctions.length === 0) {
                 gjContainer.innerHTML = '<p style="color:#888;font-size:12px;">No putative gap junctions marked yet.<br>'
-                    + 'Select an overlap or contact, navigate to the location, then click \u26a1 Mark Gap Junction.</p>';
+                    + 'Select an overlap or contact, navigate to the location, then click \u26a1 Putative Gap-Junc.</p>';
                 return;
             }
             // Group by undirected pair
@@ -1542,19 +2064,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         // ── Connectivity matrix (GJ + Chemical Synapses) ───────────
         function renderConnectivityMatrix() {
-            // Collect all neuron names from overlaps + synapses + gap junctions
+            // Collect all neuron names from overlaps + synapses + gap junctions + RAW_COUNTS
             const allNames = new Set();
             overlapTable.forEach(r => { allNames.add(r.source); allNames.add(r.target); });
             synapseList.forEach(s => { allNames.add(s.source); allNames.add(s.target); });
             gapJunctions.forEach(gj => { allNames.add(gj.source); allNames.add(gj.target); });
+            CELL_NAMES.forEach(n => allNames.add(n));
             const names = Array.from(allNames).sort();
 
-            // Build chemical synapse count: source -> target (directional)
+            // Build chemical synapse count from RAW_COUNTS (curated mat783 cleft>=50)
             const chemCount = {};
-            synapseList.forEach(s => {
-                const key = s.source + '|' + s.target;
-                chemCount[key] = (chemCount[key] || 0) + 1;
-            });
+            for (let pi = 0; pi < N_CELLS; pi++) {
+                for (let qi = 0; qi < N_CELLS; qi++) {
+                    const cnt = RAW_COUNTS[pi][qi];
+                    if (cnt > 0) {
+                        const key = CELL_NAMES[pi] + '|' + CELL_NAMES[qi];
+                        chemCount[key] = cnt;
+                    }
+                }
+            }
 
             // Build GJ count: undirected pair
             const gjCount = {};
@@ -1566,10 +2094,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             });
 
             let html = '<p style="color:#aaa;font-size:10px;margin:0 0 6px;">'
-                + 'Rows \u2192 Columns. '
+                + 'Rows \u2192 Columns (mat783, cleft\u226550). '
                 + '<span style="color:#39FF14;">\u25cf GJ</span> &nbsp; '
-                + '<span style="color:#FFD700;">\u25cf Chem. Syn.</span> &nbsp; '
-                + '<span style="color:#00BFFF;">\u25cf Both</span></p>';
+                + '<span style="color:#FFD700;">\u25cf Excitatory (ACh/Glut)</span> &nbsp; '
+                + '<span style="color:#64b5f6;">\u25cf Inhibitory (GABA)</span> &nbsp; '
+                + '<span style="color:#00BFFF;">\u25cf GJ+Syn</span></p>';
             html += '<table><thead><tr><th class="corner"></th>';
             names.forEach(n => { html += '<th>' + n.replace('_', '<br>') + '</th>'; });
             html += '</tr></thead><tbody>';
@@ -1584,15 +2113,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         html += '<td class="no-data">-</td>';
                         return;
                     }
+                    // Determine NT type for color-coding
+                    const pi = CI[src], qi = CI[tgt];
+                    const isInh = (pi !== undefined && qi !== undefined && SYN_ESYN[pi][qi] < -10);
                     let bg, fg;
                     if (nGJ > 0 && nChem > 0) { bg = '#00BFFF'; fg = '#000'; }
                     else if (nGJ > 0)          { bg = '#39FF14'; fg = '#000'; }
+                    else if (isInh)            { bg = '#64b5f6'; fg = '#000'; }
                     else                       { bg = '#FFD700'; fg = '#000'; }
                     const parts = [];
                     if (nGJ > 0) parts.push(nGJ + ' GJ');
-                    if (nChem > 0) parts.push(nChem + ' syn');
+                    if (nChem > 0) parts.push(nChem + (isInh ? ' inh' : ' exc'));
                     const cellText = parts.join('+');
-                    const tip = src + ' \u2192 ' + tgt + ': ' + parts.join(', ');
+                    const ntLabel = isInh ? ' (GABA)' : (nChem > 0 ? ' (ACh/Glut)' : '');
+                    const tip = src + ' \u2192 ' + tgt + ': ' + parts.join(', ') + ntLabel;
                     html += '<td style="background:' + bg + ';color:' + fg
                         + ';font-size:9px;font-weight:bold;" title="' + tip + '">'
                         + cellText + '</td>';
@@ -1603,6 +2137,79 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             connectivityContainer.innerHTML = html;
         }
 
+        // ── Cell names & index mapping (shared by Tier 1 + Tier 2) ──
+        const CELL_NAMES = [
+            'MOT_L','MOT_R','MOS_L','MOS_R',
+            'VS1_L','VS1_R','VS2_L','VS2_R',
+            'VS3_L','VS3_R','VS4_L','VS4_R',
+            'HSN_L','HSN_R','HSE_L','HSE_R',
+            'HSS_L','HSS_R',
+            'BIPS_L','BIPS_R','H2_L','H2_R'
+        ];
+        const N_CELLS = CELL_NAMES.length;
+        const CI = {}; CELL_NAMES.forEach((n,i) => { CI[n] = i; });
+        const SPIKING = new Set(['MOT_L','MOT_R','MOS_L','MOS_R']);
+
+        // ── RAW_COUNTS: rows=pre, cols=post  [from synapses.csv] ──
+        const RAW_COUNTS = [
+         // MOT_L MOT_R MOS_L MOS_R VS1_L VS1_R VS2_L VS2_R VS3_L VS3_R VS4_L VS4_R HSN_L HSN_R HSE_L HSE_R HSS_L HSS_R BIPS_L BIPS_R H2_L H2_R
+            [0,    0,    3,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // MOT_L
+            [0,    0,    0,    3,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // MOT_R
+            [3,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // MOS_L
+            [0,    6,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // MOS_R
+            [0,    0,    0,    0,    0,    0,    3,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS1_L
+            [0,    0,    0,    0,    0,    0,    0,    4,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS1_R
+            [0,    0,    6,    0,    1,    0,    0,    0,    4,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS2_L
+            [0,    0,    0,    0,    0,    6,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS2_R
+            [0,    0,    6,    0,    0,    0,   12,    0,    0,    0,    2,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS3_L
+            [0,    0,    0,    5,    0,    0,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS3_R
+            [0,    0,    0,    0,    0,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS4_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    2,    0,    0,    0,    0,    0,    0],  // VS4_R
+            [2,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    0,    0,    0,    0,    8,    0,    0],  // HSN_L
+            [0,    9,    0,    4,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    7,    0,    3,   29,    4,    0,    0],  // HSN_R
+            [4,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    5,    0,    0,    0,    0,    0,    2,   45,    0,    0],  // HSE_L
+            [0,    6,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    0,    2,    0,    0,    0,    0,   63,   12,    0,    0],  // HSE_R
+            [4,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    2,    0,    0,    0,    0,    0,    0,   41,    0,    0],  // HSS_L
+            [0,    3,    0,    2,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   37,    0,    0,    0],  // HSS_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   23,    0,    8,    0,    0,    0,    0,    0,    0,    0],  // BIPS_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    4,    0,   15,    1,    0,    1,    0,    0,    0],  // BIPS_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // H2_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // H2_R
+        ];
+
+        // ── SYN_ESYN: per-connection reversal potential (mV) ──
+        // FlyWire NT predictions: ACh/Glut → excitatory (0 mV), GABA → inhibitory (-80 mV)
+        // VS chain fwd (VS1→VS2, VS2→VS3, VS3→VS4) = GABA(-80)
+        // VS chain back (VS3→VS2, VS2→VS1, VS4→VS2) = ACh(0)
+        // HS→MN, VS→MOS, HS→BIPS, HS chain, MN↔MN = excitatory(0)
+        // BIPS→HS, BIPS→BIPS = GABA(-80) (GABAergic interneurons)
+        const E_EXC = 0, E_INH = -80;
+        const SYN_ESYN = [
+         // MOT_L MOT_R MOS_L MOS_R VS1_L VS1_R VS2_L VS2_R VS3_L VS3_R VS4_L VS4_R HSN_L HSN_R HSE_L HSE_R HSS_L HSS_R BIPS_L BIPS_R H2_L H2_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // MOT_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // MOT_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // MOS_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // MOS_R
+            [0,    0,    0,    0,    0,    0,  -80,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // VS1_L  fwd→VS2
+            [0,    0,    0,    0,    0,    0,    0,  -80,    0,  -80,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // VS1_R  fwd→VS2,VS3
+            [0,    0,    0,    0,    0,    0,    0,    0,  -80,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // VS2_L  fwd→VS3
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // VS2_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,  -80,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // VS3_L  fwd→VS4
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // VS3_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // VS4_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // VS4_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // HSN_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // HSN_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // HSE_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // HSE_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // HSS_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // HSS_R
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,  -80,    0,  -80,    0,    0,    0,    0,    0,    0,    0  ],  // BIPS_L  →HSN,HSE GABA
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,  -80,    0,  -80,  -80,    0,  -80,    0,    0,    0  ],  // BIPS_R  →HSN,HSE,HSS,BIPS GABA
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // H2_L
+            [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ],  // H2_R
+        ];
+
         // ── Tier 1 Circuit Model ────────────────────────────────────
         let circuitInitialized = false;
         function renderCircuitModel() {
@@ -1611,42 +2218,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             const dt = 0.01;  // ms (match user's code)
             const Cm = 1.0;
-            const VCa = 120, V_Na = 50, V_K = -77, E_SYN = 0;
-
-            // ── Cell names & index mapping (match RAW_COUNTS order) ──
-            const CELL_NAMES = [
-                'MOT_L','MOT_R','MOS_L','MOS_R',
-                'VS1_L','VS1_R','VS2_L','VS2_R',
-                'VS3_L','VS3_R','VS4_L','VS4_R',
-                'HSN_L','HSN_R','HSE_L','HSE_R',
-                'HSS_L','HSS_R'
-            ];
-            const N_CELLS = CELL_NAMES.length;
-            const CI = {}; CELL_NAMES.forEach((n,i) => { CI[n] = i; });
-            const SPIKING = new Set(['MOT_L','MOT_R','MOS_L','MOS_R']);
-
-            // ── RAW_COUNTS: rows=pre, cols=post ──
-            const RAW_COUNTS = [
-             // MOT_L MOT_R MOS_L MOS_R VS1_L VS1_R VS2_L VS2_R VS3_L VS3_R VS4_L VS4_R HSN_L HSN_R HSE_L HSE_R HSS_L HSS_R
-                [0,    0,    3,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // MOT_L
-                [0,    0,    0,    3,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // MOT_R
-                [3,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // MOS_L
-                [0,    6,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // MOS_R
-                [0,    0,    0,    0,    0,    0,    3,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS1_L
-                [0,    0,    0,    0,    0,    0,    0,    4,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0],  // VS1_R
-                [0,    0,    6,    0,    1,    0,    0,    0,    4,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS2_L
-                [0,    0,    0,    0,    0,    6,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS2_R
-                [0,    0,    6,    0,    0,    0,   12,    0,    0,    0,    2,    0,    0,    0,    0,    0,    0,    0],  // VS3_L
-                [0,    0,    0,    5,    0,    0,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS3_R
-                [0,    0,    0,    0,    0,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // VS4_L
-                [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    2,    0,    0],  // VS4_R
-                [2,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    0,    0,    0],  // HSN_L
-                [0,    9,    0,    4,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    7,    0,    3],  // HSN_R
-                [4,    0,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    5,    0,    0,    0,    0,    0],  // HSE_L
-                [0,    6,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    0,    2,    0,    0,    0,    0],  // HSE_R
-                [4,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    2,    0,    0,    0,    0,    0],  // HSS_L
-                [0,    3,    0,    2,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],  // HSS_R
-            ];
+            const VCa = 120, V_Na = 50, V_K = -77;
 
             // ── Gate kinetics ──
             function alphaM(V) { const x = V+40; return Math.abs(x)<1e-7 ? 1 : 0.1*x/(1-Math.exp(-x/10)); }
@@ -1720,18 +2292,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
 
             // ── Graded synapse (LPTC pre) ──
-            function createGradedSyn(nSyn, gPerSyn) {
-                return { gMax: nSyn*gPerSyn, Vthresh: -60, Vscale: 30 };
+            function createGradedSyn(nSyn, gPerSyn, Erev) {
+                return { gMax: nSyn*gPerSyn, Vthresh: pVthresh, Vscale: pVscale, Erev };
             }
             function gradedCurrent(s, Vpre, Vpost) {
                 if (s.gMax < 1e-15) return 0;
                 const rel = Math.max(0, Math.min(1, (Vpre-s.Vthresh)/s.Vscale));
-                return -s.gMax * rel * (Vpost - E_SYN);
+                return -s.gMax * rel * (Vpost - s.Erev);
             }
 
             // ── Alpha synapse (MN pre, spiking) ──
-            function createAlphaSyn(nSyn, gPerSyn, tau) {
-                return { gMax: nSyn*gPerSyn, tau, g: 0, dg: 0, prevV: -65, thresh: 0 };
+            function createAlphaSyn(nSyn, gPerSyn, tau, Erev) {
+                return { gMax: nSyn*gPerSyn, tau, g: 0, dg: 0, prevV: -65, thresh: 0, Erev };
             }
             function alphaStep(s, Vpre, Vpost) {
                 if (Vpre > s.thresh && s.prevV <= s.thresh) s.dg += s.gMax/s.tau;
@@ -1740,31 +2312,39 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 s.dg -= s.dg / s.tau * dt;
                 s.g   = Math.max(0, s.g);
                 if (s.gMax < 1e-15) return 0;
-                return -s.g * (Vpost - E_SYN);
+                return -s.g * (Vpost - s.Erev);
             }
 
             // ── Default parameters ──
             let pGVT_l = 0.5, pGL_l = 0.05, pGK_l = 2.0;
             let pRinVS1 = 150, pVrVS1 = -40, pRinHS = 150, pVrHS = -45;
-            let pGVT_m = 0.3, pGL_m = 0.3, pRinM = 300;
-            let pGNa = 120, pGK_m = 36, pVLm = -65, pGNaP = 0.5;
-            let pGlptc = 0.05, pClptc = 0.05, pGmn = 0.1, pCmn = 0.8;
-            let pGgrad = 0.005, pGspike = 0.02, pTauSyn = 5;
+            let pGVT_m = 0.0, pGL_m = 0.3, pRinM = 300;
+            let pGNa = 120, pGK_m = 36, pVLm = -65, pGNaP = 0.5, pIbias_m = 0;
+            let pGlptc = 0.05, pClptc = 0.05;
+            let pGvsmos = 0.1, pGhsmos = 0.1, pGhsmot = 0.1, pCmn = 0.8;
+            let pGgradExc = 0.005, pGgradInh = 0.004;
+            let pGspikeExc = 0.02, pGspikeInh = 0.016, pTauSyn = 5;
+            let pVthresh = -40, pVscale = 20;
 
             function buildAndRun() {
+                const disabledNodeSet = new Set(circuitDisabledNodes);
                 // ── Instantiate cells ──
                 const cells = [];
                 const VS_Vr  = [pVrVS1, pVrVS1-5, pVrVS1-10, pVrVS1-15];
                 const VS_Rin = [pRinVS1, pRinVS1-10, pRinVS1-20, pRinVS1-30];
                 CELL_NAMES.forEach(n => {
+                    const enabled = !disabledNodeSet.has(n);
+                    let cell;
                     if (n.startsWith('VS')) {
                         const k = parseInt(n[2]) - 1;
-                        cells.push(createLPTC(n, VS_Rin[k], VS_Vr[k], pGVT_l, pGL_l, pGK_l));
+                        cell = createLPTC(n, VS_Rin[k], VS_Vr[k], pGVT_l, pGL_l, pGK_l);
                     } else if (n.startsWith('HS')) {
-                        cells.push(createLPTC(n, pRinHS, pVrHS, pGVT_l, pGL_l, pGK_l));
+                        cell = createLPTC(n, pRinHS, pVrHS, pGVT_l, pGL_l, pGK_l);
                     } else {
-                        cells.push(createMN(n, pRinM, pVLm, pGVT_m, pGL_m, pGNa, pGK_m, pGNaP));
+                        cell = createMN(n, pRinM, pVLm, pGVT_m, pGL_m, pGNa, pGK_m, pGNaP);
                     }
+                    cell.enabled = enabled;
+                    cells.push(cell);
                 });
 
                 // ── Chemical synapses from RAW_COUNTS ──
@@ -1772,31 +2352,51 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 for (let pi = 0; pi < N_CELLS; pi++) {
                     for (let qi = 0; qi < N_CELLS; qi++) {
                         const cnt = RAW_COUNTS[pi][qi];
-                        if (cnt === 0) continue;
+                        if (cnt === 0 || !cells[pi].enabled || !cells[qi].enabled) continue;
+                        const Erev = SYN_ESYN[pi][qi];
+                        const gPerSyn = (Erev < -10)
+                            ? (SPIKING.has(CELL_NAMES[pi]) ? pGspikeInh : pGgradInh)
+                            : (SPIKING.has(CELL_NAMES[pi]) ? pGspikeExc : pGgradExc);
                         if (SPIKING.has(CELL_NAMES[pi])) {
-                            synapses.push({ pre: pi, post: qi, obj: createAlphaSyn(cnt, pGspike, pTauSyn) });
+                            synapses.push({ pre: pi, post: qi, obj: createAlphaSyn(cnt, gPerSyn, pTauSyn, Erev) });
                         } else {
-                            synapses.push({ pre: pi, post: qi, obj: createGradedSyn(cnt, pGgrad) });
+                            synapses.push({ pre: pi, post: qi, obj: createGradedSyn(cnt, gPerSyn, Erev) });
                         }
                     }
                 }
 
                 // ── Gap junctions (bidirectional, LP-filtered) ──
                 const gjList = [];
-                // Within VS chains
+                // Within VS chains (VS1↔VS2↔VS3↔VS4)
                 ['L','R'].forEach(s => {
-                    for (let k = 1; k <= 3; k++)
-                        gjList.push({ a: CI['VS'+k+'_'+s], b: CI['VS'+(k+1)+'_'+s], gj: createGJ(pGlptc, pClptc) });
-                    // Within HS chains
-                    gjList.push({ a: CI['HSN_'+s], b: CI['HSE_'+s], gj: createGJ(pGlptc, pClptc) });
-                    gjList.push({ a: CI['HSE_'+s], b: CI['HSS_'+s], gj: createGJ(pGlptc, pClptc) });
-                    // LPTC axon \u2194 MN dendrite (bidirectional)
+                    for (let k = 1; k <= 3; k++) {
+                        const a = CI['VS'+k+'_'+s], b = CI['VS'+(k+1)+'_'+s];
+                        if (cells[a].enabled && cells[b].enabled)
+                            gjList.push({ a, b, gj: createGJ(pGlptc, pClptc) });
+                    }
+                    // Within HS chains (HSN↔HSE↔HSS)
+                    if (cells[CI['HSN_'+s]].enabled && cells[CI['HSE_'+s]].enabled)
+                        gjList.push({ a: CI['HSN_'+s], b: CI['HSE_'+s], gj: createGJ(pGlptc, pClptc) });
+                    if (cells[CI['HSE_'+s]].enabled && cells[CI['HSS_'+s]].enabled)
+                        gjList.push({ a: CI['HSE_'+s], b: CI['HSS_'+s], gj: createGJ(pGlptc, pClptc) });
+                    // VS \u2194 MOS (bidirectional)
                     const mos = CI['MOS_'+s], mot = CI['MOT_'+s];
-                    for (let k = 1; k <= 4; k++)
-                        gjList.push({ a: CI['VS'+k+'_'+s], b: mos, gj: createGJ(pGmn, pCmn) });
+                    for (let k = 1; k <= 4; k++) {
+                        const a = CI['VS'+k+'_'+s];
+                        if (cells[a].enabled && cells[mos].enabled)
+                            gjList.push({ a, b: mos, gj: createGJ(pGvsmos, pCmn) });
+                    }
+                    // HS \u2194 MOS (bidirectional)
                     ['HSN','HSE','HSS'].forEach(h => {
-                        gjList.push({ a: CI[h+'_'+s], b: mos, gj: createGJ(pGmn, pCmn) });
-                        gjList.push({ a: CI[h+'_'+s], b: mot, gj: createGJ(pGmn, pCmn) });
+                        const a = CI[h+'_'+s];
+                        if (cells[a].enabled && cells[mos].enabled)
+                            gjList.push({ a, b: mos, gj: createGJ(pGhsmos, pCmn) });
+                    });
+                    // HS \u2194 MOT (bidirectional; VS does NOT connect to MOT)
+                    ['HSN','HSE','HSS'].forEach(h => {
+                        const a = CI[h+'_'+s];
+                        if (cells[a].enabled && cells[mot].enabled)
+                            gjList.push({ a, b: mot, gj: createGJ(pGhsmot, pCmn) });
                     });
                 });
 
@@ -1834,15 +2434,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     const extI = new Float64Array(N_CELLS);
                     if (t >= stimStart && t <= stimEnd) {
                         stimTargets.forEach(sn => {
-                            if (CI[sn] !== undefined) extI[CI[sn]] += stimAmp;
+                            if (CI[sn] !== undefined && cells[CI[sn]].enabled) extI[CI[sn]] += stimAmp;
                         });
                     }
+                    // Tonic bias for MN cells (active throughout simulation)
+                    for (let n = 0; n < N_CELLS; n++)
+                        if (cells[n].enabled && cells[n].type !== 'LPTC') extI[n] += pIbias_m;
                     // Noise
                     for (let n = 0; n < N_CELLS; n++)
-                        extI[n] += noiseLevel * (Math.random()*2-1);
+                        if (cells[n].enabled) extI[n] += noiseLevel * (Math.random()*2-1);
 
                     // 4. Step all cells
                     for (let n = 0; n < N_CELLS; n++) {
+                        if (!cells[n].enabled) {
+                            cells[n].V = cells[n].VL;
+                            rec[CELL_NAMES[n]][step] = cells[n].V;
+                            continue;
+                        }
                         const Itot = gjI[n] + chemI[n] + extI[n];
                         if (cells[n].type === 'LPTC') stepLPTC(cells[n], Itot);
                         else stepMN(cells[n], Itot);
@@ -1856,6 +2464,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             let simTime = 1500, stimStart = 90, stimEnd = 590, stimAmp = 10;
             let noiseLevel = 3;
             let stimTargets = ['VS1_L','VS2_L','VS3_L','VS4_L'];
+            const circuitDisabledNodes = new Set();
 
             // ── Build UI ──
             let html = '<div style="display:flex;flex-direction:column;gap:6px;">';
@@ -1863,37 +2472,137 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             // Wiring diagram (SVG)
             html += '<div id="wiringDiagram" style="background:#1a1a2e;border:1px solid #444;'
                 + 'border-radius:4px;padding:8px;overflow-x:auto;"></div>';
+            html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">';
+            html += '<div id="circuitToggleStatus" style="color:#9aa0a6;font-size:10px;">'
+                + 'Click a neuron in the wiring diagram to deactivate it and all of its connections.'
+                + '</div>';
+            html += '<button id="circResetNodes" style="background:#37474f;color:#fff;border:1px solid #607d8b;'
+                + 'padding:3px 10px;border-radius:3px;cursor:pointer;font-size:10px;">Reset node toggles</button>';
+            html += '</div>';
 
             // Controls
-            html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 0;">';
-            html += '<label style="color:#ccc;font-size:11px;">Stim: '
-                + '<select id="circStimGroup" style="background:#333;color:#fff;border:1px solid #555;font-size:11px;">'
-                + '<option value="VS_L">VS1-4 Left</option>'
-                + '<option value="VS_R">VS1-4 Right</option>'
-                + '<option value="HS_L">HSN/E/S Left</option>'
-                + '<option value="HS_R">HSN/E/S Right</option>'
+            html += '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;padding:4px 0;">';
+            html += '<label style="color:#ccc;font-size:11px;display:flex;flex-direction:column;gap:2px;">'
+                + '<span>Stim targets <span style="color:#888;font-size:9px;">(Ctrl/\u2318 multi)</span></span>'
+                + '<select id="circStimGroup" multiple size="6" '
+                + 'style="background:#1e1e1e;color:#fff;border:1px solid #555;font-size:10px;min-width:110px;">'
+                + '<optgroup label="\u2014 Groups \u2014" style="color:#888;">'
+                + '<option value="VS_L" selected>VS Left (1-4)</option>'
+                + '<option value="VS_R">VS Right (1-4)</option>'
+                + '<option value="HS_L">HS Left</option>'
+                + '<option value="HS_R">HS Right</option>'
                 + '<option value="ALL_L">All Left LPTCs</option>'
+                + '<option value="ALL_R">All Right LPTCs</option>'
                 + '<option value="MN_L">MOS+MOT Left</option>'
+                + '<option value="MN_R">MOS+MOT Right</option>'
+                + '</optgroup>'
+                + '<optgroup label="\u2014 MOT / MOS \u2014" style="color:#888;">'
+                + '<option value="MOT_L">MOT_L</option>'
+                + '<option value="MOT_R">MOT_R</option>'
+                + '<option value="MOS_L">MOS_L</option>'
+                + '<option value="MOS_R">MOS_R</option>'
+                + '</optgroup>'
+                + '<optgroup label="\u2014 VS \u2014" style="color:#888;">'
+                + '<option value="VS1_L">VS1_L</option>'
+                + '<option value="VS1_R">VS1_R</option>'
+                + '<option value="VS2_L">VS2_L</option>'
+                + '<option value="VS2_R">VS2_R</option>'
+                + '<option value="VS3_L">VS3_L</option>'
+                + '<option value="VS3_R">VS3_R</option>'
+                + '<option value="VS4_L">VS4_L</option>'
+                + '<option value="VS4_R">VS4_R</option>'
+                + '</optgroup>'
+                + '<optgroup label="\u2014 HS \u2014" style="color:#888;">'
+                + '<option value="HSN_L">HSN_L</option>'
+                + '<option value="HSN_R">HSN_R</option>'
+                + '<option value="HSE_L">HSE_L</option>'
+                + '<option value="HSE_R">HSE_R</option>'
+                + '<option value="HSS_L">HSS_L</option>'
+                + '<option value="HSS_R">HSS_R</option>'
+                + '</optgroup>'
                 + '</select></label>';
-            html += '<label style="color:#ccc;font-size:10px;">Amp: '
+            html += '<div style="display:flex;flex-direction:column;gap:4px;">';
+            html += '<label style="color:#ccc;font-size:10px;">Amp (nA): '
                 + '<input id="circStimAmp" type="number" value="10" step="1" min="-100" max="100" '
-                + 'style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
             html += '<label style="color:#ccc;font-size:10px;">t<sub>start</sub>: '
                 + '<input id="circStimStart" type="number" value="90" step="10" min="0" max="8000" '
-                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+                + 'style="width:55px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
             html += '<label style="color:#ccc;font-size:10px;">t<sub>end</sub>: '
                 + '<input id="circStimEnd" type="number" value="590" step="10" min="0" max="8000" '
-                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+                + 'style="width:55px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
             html += '<label style="color:#ccc;font-size:10px;">T<sub>max</sub>: '
                 + '<input id="circSimTime" type="number" value="1500" step="100" min="100" max="10000" '
                 + 'style="width:55px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
             html += '<label style="color:#ccc;font-size:10px;">Noise: '
                 + '<input id="circNoise" type="number" value="3" step="0.5" min="0" max="10" '
-                + 'style="width:40px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+                + 'style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
             html += '<button id="circRun" style="background:#2E7D32;color:#fff;border:1px solid #4CAF50;'
                 + 'padding:4px 14px;border-radius:3px;cursor:pointer;font-size:11px;font-weight:bold;">'
                 + '\u25b6 Run</button>';
             html += '</div>';
+            html += '</div>';
+
+            // ── Cell Parameters ──
+            html += '<details style="color:#aaa;font-size:10px;">'
+                + '<summary style="cursor:pointer;color:#ef9a9a;">Cell Parameters (MN &amp; LPTC)</summary>';
+            html += '<div style="display:flex;gap:10px;flex-wrap:wrap;padding:4px 0;">';
+
+            // MN spiking cells (MOT/MOS) — orange labels
+            html += '<fieldset style="border:1px solid #555;padding:4px 8px;margin:0;">'
+                + '<legend style="color:#ff7043;font-size:10px;">MN spiking (MOT/MOS)</legend>'
+                + '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+            html += '<label style="color:#ff7043;font-size:10px;" title="Leak reversal potential (mV). More negative \u2192 slower spontaneous rate.">V<sub>L</sub>: '
+                + '<input id="pVLm" type="number" value="-65" step="1" min="-90" max="-40" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ff7043;font-size:10px;" title="Persistent Na\u207a conductance (nS). Primary driver of spontaneous firing. Reduce to lower rate and restore spike height in trains.">g<sub>NaP</sub>: '
+                + '<input id="pGNaP" type="number" value="0.5" step="0.05" min="0" max="3" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ff7043;font-size:10px;" title="Transient Na\u207a conductance (nS). Controls spike height.">g<sub>Na</sub>: '
+                + '<input id="pGNa" type="number" value="120" step="5" min="10" max="300" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ff7043;font-size:10px;" title="Delayed-rectifier K\u207a conductance (nS). Larger \u2192 deeper AHP \u2192 better Na recovery between spikes \u2192 consistent spike heights. Larger also prevents depolarisation block.">g<sub>K</sub>: '
+                + '<input id="pGKm" type="number" value="36" step="2" min="5" max="150" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ff7043;font-size:10px;" title="Leak conductance (nS). Larger \u2192 more stable, less prone to depolarisation block at high drive.">g<sub>L</sub>: '
+                + '<input id="pGLm" type="number" value="0.3" step="0.05" min="0" max="5" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ff7043;font-size:10px;" title="Input resistance (M\u03a9).">R<sub>in</sub>: '
+                + '<input id="pRinM" type="number" value="300" step="10" min="50" max="1000" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ffcc80;font-size:10px;" title="Tonic bias current injected into ALL MN cells at all times (nA). Positive \u2192 sustained depolarisation (tonic component). Negative \u2192 hyperpolarising drive.">I<sub>bias-MN</sub>: '
+                + '<input id="pIbiasM" type="number" value="0" step="0.5" min="-20" max="20" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '</div></fieldset>';
+
+            // LPTC non-spiking (VS/HS) — purple labels
+            html += '<fieldset style="border:1px solid #555;padding:4px 8px;margin:0;">'
+                + '<legend style="color:#ce93d8;font-size:10px;">LPTC non-spiking (VS/HS)</legend>'
+                + '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+            html += '<label style="color:#ce93d8;font-size:10px;" title="VS1 resting potential (mV). VS2/3/4 are \u22125/\u221210/\u221215 mV from this.">V<sub>r-VS1</sub>: '
+                + '<input id="pVrVS1" type="number" value="-40" step="1" min="-80" max="-10" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ce93d8;font-size:10px;" title="HS resting potential (mV).">V<sub>r-HS</sub>: '
+                + '<input id="pVrHS" type="number" value="-45" step="1" min="-80" max="-10" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ce93d8;font-size:10px;" title="LPTC T-type Ca\u00b2\u207a conductance (nS).">g<sub>VT-LPTC</sub>: '
+                + '<input id="pGVTl" type="number" value="0.5" step="0.05" min="0" max="3" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ce93d8;font-size:10px;" title="LPTC K\u207a conductance (nS).">g<sub>K-LPTC</sub>: '
+                + '<input id="pGKl" type="number" value="2.0" step="0.1" min="0" max="10" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ce93d8;font-size:10px;" title="LPTC leak conductance (nS).">g<sub>L-LPTC</sub>: '
+                + '<input id="pGLl" type="number" value="0.05" step="0.005" min="0" max="1" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ce93d8;font-size:10px;" title="HS input resistance (M\u03a9). VS1-4 step down by 10 each.">R<sub>in-HS</sub>: '
+                + '<input id="pRinHS" type="number" value="150" step="10" min="50" max="1000" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ce93d8;font-size:10px;" title="VS1 input resistance (M\u03a9). VS2/3/4 step down by 10 each.">R<sub>in-VS1</sub>: '
+                + '<input id="pRinVS1" type="number" value="150" step="10" min="50" max="1000" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '</div></fieldset>';
+
+            html += '</div></details>';
 
             // GJ/Synapse parameter row
             html += '<details style="color:#aaa;font-size:10px;"><summary style="cursor:pointer;color:#aed581;">GJ &amp; Synapse Parameters</summary>';
@@ -1904,50 +2613,81 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             html += '<label style="color:#aed581;font-size:10px;">C<sub>LPTC-GJ</sub>: '
                 + '<input id="pClptc" type="number" value="0.05" step="0.005" min="0" max="1" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#aed581;font-size:10px;">G<sub>MN-GJ</sub>: '
-                + '<input id="pGmn" type="number" value="0.1" step="0.005" min="0" max="1" '
+            html += '<label style="color:#80cbc4;font-size:10px;" title="VS1-4 to MOS gap junction conductance (nS)">G<sub>VS\u2194MOS</sub>: '
+                + '<input id="pGvsmos" type="number" value="0.1" step="0.01" min="0" max="2" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#aed581;font-size:10px;">C<sub>MN-GJ</sub>: '
+            html += '<label style="color:#80cbc4;font-size:10px;" title="HS to MOS gap junction conductance (nS)">G<sub>HS\u2194MOS</sub>: '
+                + '<input id="pGhsmos" type="number" value="0.1" step="0.01" min="0" max="2" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#80cbc4;font-size:10px;" title="HS to MOT gap junction conductance (nS). VS does not couple to MOT.">G<sub>HS\u2194MOT</sub>: '
+                + '<input id="pGhsmot" type="number" value="0.1" step="0.01" min="0" max="2" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#80cbc4;font-size:10px;" title="LP-filter capacitance for LPTC\u2194MN gap junctions (sets tau = C/G)">C<sub>MN-GJ</sub>: '
                 + '<input id="pCmn" type="number" value="0.8" step="0.01" min="0" max="2" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ffcc02;font-size:10px;">g<sub>grad</sub>: '
-                + '<input id="pGgrad" type="number" value="0.005" step="0.001" min="0" max="0.05" '
+            html += '<label style="color:#ffcc02;font-size:10px;" title="Per-contact graded chemical conductance for excitatory synapses (nS)">g<sub>grad-exc</sub>: '
+                + '<input id="pGgradExc" type="number" value="0.005" step="0.001" min="0" max="0.05" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ffcc02;font-size:10px;">g<sub>spike</sub>: '
-                + '<input id="pGspike" type="number" value="0.02" step="0.005" min="0" max="0.2" '
+            html += '<label style="color:#64b5f6;font-size:10px;" title="Per-contact graded chemical conductance for inhibitory synapses (nS)">g<sub>grad-inh</sub>: '
+                + '<input id="pGgradInh" type="number" value="0.004" step="0.001" min="0" max="0.05" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ffcc02;font-size:10px;" title="Per-contact alpha-synapse increment for excitatory MN-pre synapses (nS)">g<sub>spike-exc</sub>: '
+                + '<input id="pGspikeExc" type="number" value="0.02" step="0.005" min="0" max="0.2" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#64b5f6;font-size:10px;" title="Per-contact alpha-synapse increment for inhibitory MN-pre synapses (nS)">g<sub>spike-inh</sub>: '
+                + '<input id="pGspikeInh" type="number" value="0.016" step="0.005" min="0" max="0.2" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
             html += '<label style="color:#ffcc02;font-size:10px;">\u03c4<sub>syn</sub>: '
                 + '<input id="pTauSyn" type="number" value="5" step="0.5" min="0.5" max="50" '
                 + 'style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ef9a9a;font-size:10px;">g<sub>VT-MN</sub>: '
+                + '<input id="pGVTm" type="number" value="0.0" step="0.05" min="0" max="2" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;" '
+                + 'title="T-Ca conductance in spiking MN cells. Keep at 0 to avoid burst-then-silence."></label>';
+            html += '<label style="color:#ef9a9a;font-size:10px;">V<sub>thresh-grad</sub>: '
+                + '<input id="pVthresh" type="number" value="-40" step="1" min="-80" max="0" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;" '
+                + 'title="Release threshold for graded synapses (mV). Set equal to most depolarised LPTC resting V to prevent tonic release."></label>';
+            html += '<label style="color:#ef9a9a;font-size:10px;">V<sub>scale-grad</sub>: '
+                + '<input id="pVscale" type="number" value="20" step="1" min="1" max="60" '
+                + 'style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;" '
+                + 'title="mV range over which graded release goes from 0 to 1."></label>';
             html += '</div></details>';
 
             // Plot areas
             html += '<div id="circPlotLPTC" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>';
             html += '<div id="circPlotMN" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>';
+            html += '<div id="circPlotPupilTime" style="width:100%;height:210px;background:#1a1a1a;border:1px solid #444;"></div>';
+            html += '<div id="circPlotPupilPolar" style="width:100%;height:230px;background:#1a1a1a;border:1px solid #444;"></div>';
             html += '</div>';
 
             circuitContainer.innerHTML = html;
 
-            // ── Draw SVG wiring diagram ──
-            (function drawWiring() {
-                const W = 880, H = 340;
+            function updateCircuitToggleStatus() {
+                const el = document.getElementById('circuitToggleStatus');
+                if (!el) return;
+                const disabled = Array.from(circuitDisabledNodes).sort();
+                el.textContent = disabled.length
+                    ? ('Inactive nodes: ' + disabled.join(', '))
+                    : 'Click a neuron in the wiring diagram to deactivate it and all of its connections.';
+            }
+
+            function drawWiring() {
+            try {
+                const W = 880, H = 560;
                 const CVS='#ce93d8', CHS='#4fc3f7', CMOS='#ef5350', CMOT='#ff7043';
                 const CGJ='#aed581', CCHEM='#ffcc02', CT='#ccc', CBG='#0d1b2e';
-
+                const isActive = name => !circuitDisabledNodes.has(name);
+                const allActive = names => names.every(isActive);
+                const lineOpacity = (names, on, off) => allActive(names) ? on : off;
+                const lineColor = (names, on, off) => allActive(names) ? on : off;
                 let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+W+' '+H+'" '
-                    + 'style="width:100%;max-height:320px;font-family:sans-serif;">';
+                    + 'style="width:100%;max-height:560px;font-family:sans-serif;">';
                 svg += '<rect width="'+W+'" height="'+H+'" fill="#1a1a2e"/>';
+                svg += '<text x="'+W/2+'" y="20" text-anchor="middle" fill="'+CT+'" font-size="13" font-weight="bold">Circuit Wiring Diagram</text>';
+                svg += '<text x="'+W/2+'" y="34" text-anchor="middle" fill="#888" font-size="9">\u27f7 green dashed = bidirectional GJ (LP-filtered) &nbsp; \u2192 yellow = chemical synapse (n = count) &nbsp; click node = toggle</text>';
 
-                // Title
-                svg += '<text x="'+W/2+'" y="20" text-anchor="middle" fill="'+CT+'" font-size="13" font-weight="bold">'
-                    + 'Circuit Wiring Diagram</text>';
-                svg += '<text x="'+W/2+'" y="34" text-anchor="middle" fill="#888" font-size="9">'
-                    + '\u27f7 green dashed = bidirectional GJ (LP-filtered) &nbsp; '
-                    + '\u2192 yellow = chemical synapse (n = count)</text>';
-
-                // Positions  {name: [cx, cy]}
                 const pos = {};
-                // Left hemisphere
                 const lx_vs = 55, lx_hs = 165, lx_mos = 290, lx_mot = 290;
                 const vs_ys = [70, 125, 180, 235];
                 const hs_ys = [70, 125, 180];
@@ -1955,47 +2695,56 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 ['HSN','HSE','HSS'].forEach((h,i) => { pos[h+'_L'] = [lx_hs, hs_ys[i]]; });
                 pos['MOS_L'] = [lx_mos, 97];
                 pos['MOT_L'] = [lx_mot, 210];
+                pos['BIPS_L'] = [lx_hs, 260];
+                pos['H2_L'] = [(lx_hs + lx_mos) / 2, 48];
 
-                // Right hemisphere (mirrored)
                 const rx_vs = W-55, rx_hs = W-165, rx_mos = W-290, rx_mot = W-290;
                 for (let k = 0; k < 4; k++) pos['VS'+(k+1)+'_R'] = [rx_vs, vs_ys[k]];
                 ['HSN','HSE','HSS'].forEach((h,i) => { pos[h+'_R'] = [rx_hs, hs_ys[i]]; });
                 pos['MOS_R'] = [rx_mos, 97];
                 pos['MOT_R'] = [rx_mot, 210];
+                pos['BIPS_R'] = [rx_hs, 260];
+                pos['H2_R'] = [(rx_hs + rx_mos) / 2, 48];
 
-                // Draw boxes
                 function neuronBox(name, color) {
-                    const p = pos[name], bw = 72, bh = 30;
+                    const p = pos[name];
+                    if (!p) return;
+                    const active = isActive(name);
+                    const bw = 72, bh = 30;
+                    svg += '<g class="circuit-node" data-neuron="'+name+'" style="cursor:pointer">';
                     svg += '<rect x="'+(p[0]-bw/2)+'" y="'+(p[1]-bh/2)+'" width="'+bw+'" height="'+bh+'" '
-                        + 'rx="5" fill="'+CBG+'" stroke="'+color+'" stroke-width="1.5"/>';
-                    svg += '<text x="'+p[0]+'" y="'+(p[1]+4)+'" text-anchor="middle" fill="'+color+'" font-size="9" font-weight="bold">'
-                        + name + '</text>';
+                        + 'rx="5" fill="'+(active ? CBG : '#141414')+'" stroke="'+(active ? color : '#5f6368')+'" stroke-width="1.5" opacity="'+(active ? '1' : '0.72')+'"/>';
+                    svg += '<text x="'+p[0]+'" y="'+(p[1]+3)+'" text-anchor="middle" fill="'+(active ? color : '#9aa0a6')+'" font-size="9" font-weight="bold" pointer-events="none">'+name+'</text>';
+                    if (!active) svg += '<text x="'+p[0]+'" y="'+(p[1]+12)+'" text-anchor="middle" fill="#b0b4b8" font-size="6.5" pointer-events="none">off</text>';
+                    svg += '</g>';
                 }
-                CELL_NAMES.forEach(n => {
-                    let c = CMOS;
-                    if (n.startsWith('VS')) c = CVS;
-                    else if (n.startsWith('HS')) c = CHS;
-                    else if (n.startsWith('MOT')) c = CMOT;
-                    neuronBox(n, c);
-                });
+                CELL_NAMES.forEach(n => neuronBox(n, neuronColors[n] || CMOS));
 
-                // GJ lines (dashed green, bidirectional)
                 function gjLine(a, b) {
                     const p1 = pos[a], p2 = pos[b];
-                    svg += '<line x1="'+p1[0]+'" y1="'+p1[1]+'" x2="'+p2[0]+'" y2="'+p2[1]+'" '
-                        + 'stroke="'+CGJ+'" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>';
+                    const op = lineOpacity([a, b], 0.85, 0.08);
+                    const col = lineColor([a, b], CGJ, '#455a64');
+                    svg += '<line x1="'+p1[0]+'" y1="'+p1[1]+'" x2="'+p2[0]+'" y2="'+p2[1]+'" stroke="'+col+'" stroke-width="2" stroke-dasharray="5,3" opacity="'+op+'"/>';
                     const mx = (p1[0]+p2[0])/2, my = (p1[1]+p2[1])/2;
-                    svg += '<line x1="'+(mx-4)+'" y1="'+my+'" x2="'+(mx+4)+'" y2="'+my+'" '
-                        + 'stroke="'+CGJ+'" stroke-width="2.5"/>';
+                    svg += '<line x1="'+(mx-5)+'" y1="'+my+'" x2="'+(mx+5)+'" y2="'+my+'" stroke="'+col+'" stroke-width="3" opacity="'+op+'"/>';
                 }
-                // VS chain GJ
                 ['L','R'].forEach(s => {
                     for (let k = 1; k <= 3; k++) gjLine('VS'+k+'_'+s, 'VS'+(k+1)+'_'+s);
                     gjLine('HSN_'+s, 'HSE_'+s);
                     gjLine('HSE_'+s, 'HSS_'+s);
                 });
 
-                // LPTC \u2194 MN GJ (bidirectional arrows)
+                function contraGJ(a, b) {
+                    const p1 = pos[a], p2 = pos[b];
+                    if (!p1 || !p2) return;
+                    const mx = W/2, my = Math.min(p1[1], p2[1]) - 15;
+                    svg += '<path d="M'+p1[0]+','+p1[1]+' Q'+mx+','+my+' '+p2[0]+','+p2[1]+'" fill="none" stroke="'+lineColor([a, b], CGJ, '#455a64')+'" stroke-width="1.5" stroke-dasharray="5,3" opacity="'+lineOpacity([a, b], 0.55, 0.08)+'"/>';
+                }
+                ['HSN','HSE','HSS'].forEach(h => {
+                    contraGJ('H2_L', h+'_R');
+                    contraGJ('H2_R', h+'_L');
+                });
+
                 function gjArrow(a, b) {
                     const p1 = pos[a], p2 = pos[b];
                     const dx = p2[0]-p1[0], dy = p2[1]-p1[1];
@@ -2003,8 +2752,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     const ux = dx/len, uy = dy/len;
                     const x1 = p1[0]+ux*38, y1 = p1[1]+uy*16;
                     const x2 = p2[0]-ux*38, y2 = p2[1]-uy*16;
-                    svg += '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" '
-                        + 'stroke="'+CGJ+'" stroke-width="1" stroke-dasharray="4,3" opacity="0.5"/>';
+                    svg += '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="'+lineColor([a, b], CGJ, '#455a64')+'" stroke-width="1.5" stroke-dasharray="4,3" opacity="'+lineOpacity([a, b], 0.75, 0.08)+'"/>';
                 }
                 ['L','R'].forEach(s => {
                     for (let k = 1; k <= 4; k++) gjArrow('VS'+k+'_'+s, 'MOS_'+s);
@@ -2014,27 +2762,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     });
                 });
 
-                // Chemical synapse arrows (yellow, directional)
                 function chemArrow(pre, post, n, dy) {
+                    const pi = CI[pre], qi = CI[post];
                     const p1 = pos[pre], p2 = pos[post];
                     if (!p1 || !p2) return;
+                    const active = allActive([pre, post]);
+                    const isInh = SYN_ESYN[pi][qi] < -10;
+                    const col = active ? (isInh ? '#64b5f6' : CCHEM) : '#455a64';
                     const dx2 = p2[0]-p1[0], dy2 = p2[1]-p1[1];
                     const len = Math.sqrt(dx2*dx2+dy2*dy2);
                     if (len < 1) return;
                     const ux = dx2/len, uy = dy2/len;
                     const x1 = p1[0]+ux*38, y1 = p1[1]+uy*16 + (dy||0);
                     const x2 = p2[0]-ux*38, y2 = p2[1]-uy*16 + (dy||0);
-                    const mid = 'M'+x1+','+y1+' L'+x2+','+y2;
                     const aid = 'ca_'+pre+'_'+post;
-                    svg += '<defs><marker id="'+aid+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">'
-                        + '<path d="M0,0 L6,3 L0,6" fill="'+CCHEM+'"/></marker></defs>';
-                    svg += '<path d="'+mid+'" stroke="'+CCHEM+'" stroke-width="'+Math.max(0.5,n*0.3)+'" '
-                        + 'fill="none" marker-end="url(#'+aid+')" opacity="0.7"/>';
+                    if (isInh) {
+                        svg += '<defs><marker id="'+aid+'" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><line x1="0" y1="0" x2="0" y2="8" stroke="'+col+'" stroke-width="2"/></marker></defs>';
+                    } else {
+                        svg += '<defs><marker id="'+aid+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="'+col+'"/></marker></defs>';
+                    }
+                    svg += '<path d="M'+x1+','+y1+' L'+x2+','+y2+'" stroke="'+col+'" stroke-width="'+Math.max(0.5, Math.sqrt(n) * 0.4)+'" fill="none" marker-end="url(#'+aid+')" opacity="'+(active ? '0.7' : '0.08')+'"/>';
                     const mx = (x1+x2)/2, my = (y1+y2)/2 - 4;
-                    svg += '<text x="'+mx+'" y="'+my+'" text-anchor="middle" fill="'+CCHEM+'" font-size="7" font-weight="bold">'
-                        + n + '</text>';
+                    svg += '<text x="'+mx+'" y="'+my+'" text-anchor="middle" fill="'+(active ? col : '#7b8794')+'" font-size="7" font-weight="bold" opacity="'+(active ? '1' : '0.35')+'">'+n+'</text>';
                 }
-                // Draw chemical synapses from RAW_COUNTS
                 for (let pi = 0; pi < N_CELLS; pi++) {
                     for (let qi = 0; qi < N_CELLS; qi++) {
                         const cnt = RAW_COUNTS[pi][qi];
@@ -2043,26 +2793,91 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     }
                 }
 
-                // Legend
-                svg += '<text x="10" y="'+( H-30)+'" fill="#888" font-size="8">'
-                    + 'GJ: LPTC chains (within-type) + LPTC axon \u2194 MN dendrite (bidirectional, LP-filtered)</text>';
-                svg += '<text x="10" y="'+(H-18)+'" fill="#888" font-size="8">'
-                    + 'Chem syn: Graded (LPTC pre, Manor 1997) / Alpha (MN pre, Dayan\u0026Abbott 2001) / E_syn=0mV</text>';
-                svg += '<text x="10" y="'+(H-6)+'" fill="#888" font-size="8">'
-                    + 'MOT\u2194MOS: dendrodendritic chemical synapses &middot; '
-                    + 'LPTC\u2192MN: axon\u2192dendrite &middot; Baines \u0026 Bate 1998</text>';
+                const mLx = W/2 - 65, mRx = W/2 + 65;
+                const mHy = pos['MOS_L'][1], mVy = pos['MOT_L'][1];
+                function muscleBox(cx, cy, label, sublabel, subCol) {
+                    svg += '<rect x="'+(cx-32)+'" y="'+(cy-14)+'" width="64" height="28" rx="5" fill="'+CBG+'" stroke="#ff8a65" stroke-width="1.5"/>';
+                    svg += '<text x="'+cx+'" y="'+(cy-2)+'" text-anchor="middle" fill="#ff8a65" font-size="7.5" font-weight="bold">'+label+'</text>';
+                    svg += '<text x="'+cx+'" y="'+(cy+9)+'" text-anchor="middle" fill="'+subCol+'" font-size="6">'+sublabel+'</text>';
+                }
+                muscleBox(mLx, mHy, 'L Musc \u2194', 'horiz (MOS)', CMOS);
+                muscleBox(mLx, mVy, 'L Musc \u2195', 'vert (MOT)', CMOT);
+                muscleBox(mRx, mHy, 'R Musc \u2194', 'horiz (MOS)', CMOS);
+                muscleBox(mRx, mVy, 'R Musc \u2195', 'vert (MOT)', CMOT);
 
-                // Legend symbols
-                svg += '<line x1="'+(W-200)+'" y1="'+(H-28)+'" x2="'+(W-170)+'" y2="'+(H-28)+'" '
-                    + 'stroke="'+CGJ+'" stroke-width="2" stroke-dasharray="5,3"/>';
-                svg += '<text x="'+(W-165)+'" y="'+(H-25)+'" fill="'+CGJ+'" font-size="8">Bidirectional GJ</text>';
-                svg += '<line x1="'+(W-200)+'" y1="'+(H-14)+'" x2="'+(W-170)+'" y2="'+(H-14)+'" '
-                    + 'stroke="'+CCHEM+'" stroke-width="2"/>';
-                svg += '<text x="'+(W-165)+'" y="'+(H-11)+'" fill="'+CCHEM+'" font-size="8">Chemical synapse</text>';
+                ['L','R'].forEach(s => {
+                    ['MOS','MOT'].forEach(mn => {
+                        const name = mn+'_'+s, p1 = pos[name];
+                        if (!p1) return;
+                        const targX = s==='L' ? mLx : mRx;
+                        const targY = mn==='MOS' ? mHy : mVy;
+                        const bw = 72;
+                        const x1 = s==='L' ? p1[0]+bw/2 : p1[0]-bw/2;
+                        const x2 = s==='L' ? (targX-32) : (targX+32);
+                        const aid = 'marr_'+name;
+                        const active = isActive(name);
+                        const col = active ? '#ff8a65' : '#455a64';
+                        svg += '<defs><marker id="'+aid+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="'+col+'"/></marker></defs>';
+                        svg += '<line x1="'+x1+'" y1="'+p1[1]+'" x2="'+x2+'" y2="'+targY+'" stroke="'+col+'" stroke-width="1.5" marker-end="url(#'+aid+')" opacity="'+(active ? '1' : '0.08')+'"/>';
+                    });
+                });
 
+                const retY = 340;
+                svg += '<rect x="'+(mLx-38)+'" y="'+(retY-12)+'" width="76" height="24" rx="4" fill="'+CBG+'" stroke="#26c6da" stroke-width="1.5" stroke-dasharray="4,2"/>';
+                svg += '<text x="'+mLx+'" y="'+(retY+4)+'" text-anchor="middle" fill="#26c6da" font-size="8" font-weight="bold">L Eye / Retina</text>';
+                svg += '<rect x="'+(mRx-38)+'" y="'+(retY-12)+'" width="76" height="24" rx="4" fill="'+CBG+'" stroke="#26c6da" stroke-width="1.5" stroke-dasharray="4,2"/>';
+                svg += '<text x="'+mRx+'" y="'+(retY+4)+'" text-anchor="middle" fill="#26c6da" font-size="8" font-weight="bold">R Eye / Retina</text>';
+
+                const retMkr = 'mret';
+                svg += '<defs><marker id="'+retMkr+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#ff8a65"/></marker></defs>';
+                [mLx, mRx].forEach(mx => {
+                    svg += '<line x1="'+mx+'" y1="'+(mHy+14)+'" x2="'+mx+'" y2="'+(retY-12)+'" stroke="#ff8a65" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#'+retMkr+')" opacity="0.7"/>';
+                    svg += '<line x1="'+mx+'" y1="'+(mVy+14)+'" x2="'+mx+'" y2="'+(retY-12)+'" stroke="#ff8a65" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#'+retMkr+')" opacity="0.7"/>';
+                });
+
+                const fbCol = '#26c6da', fbMkr = 'sfb';
+                svg += '<defs><marker id="'+fbMkr+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="'+fbCol+'"/></marker></defs>';
+                const hsBot = hs_ys[2]+16, vsBot = vs_ys[3]+16;
+                svg += '<path d="M'+(mLx-38)+' '+retY+' Q '+lx_hs+' '+(retY+15)+' '+lx_hs+' '+hsBot+'" fill="none" stroke="'+lineColor(['HSN_L','HSE_L','HSS_L'], fbCol, '#455a64')+'" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#'+fbMkr+')" opacity="'+lineOpacity(['HSN_L','HSE_L','HSS_L'], 0.7, 0.08)+'"/>';
+                svg += '<text x="'+((mLx-38+lx_hs)/2)+'" y="'+(retY+12)+'" text-anchor="middle" fill="'+lineColor(['HSN_L','HSE_L','HSS_L'], fbCol, '#7b8794')+'" font-size="5.5" opacity="'+lineOpacity(['HSN_L','HSE_L','HSS_L'], 0.7, 0.2)+'">horiz\u2192HS</text>';
+                svg += '<path d="M'+(mLx-38)+' '+retY+' Q '+lx_vs+' '+(retY+25)+' '+lx_vs+' '+vsBot+'" fill="none" stroke="'+lineColor(['VS1_L','VS2_L','VS3_L','VS4_L'], fbCol, '#455a64')+'" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#'+fbMkr+')" opacity="'+lineOpacity(['VS1_L','VS2_L','VS3_L','VS4_L'], 0.7, 0.08)+'"/>';
+                svg += '<text x="'+((mLx-38+lx_vs)/2)+'" y="'+(retY+22)+'" text-anchor="middle" fill="'+lineColor(['VS1_L','VS2_L','VS3_L','VS4_L'], fbCol, '#7b8794')+'" font-size="5.5" opacity="'+lineOpacity(['VS1_L','VS2_L','VS3_L','VS4_L'], 0.7, 0.2)+'">vert\u2192VS</text>';
+                svg += '<path d="M'+(mRx+38)+' '+retY+' Q '+rx_hs+' '+(retY+15)+' '+rx_hs+' '+hsBot+'" fill="none" stroke="'+lineColor(['HSN_R','HSE_R','HSS_R'], fbCol, '#455a64')+'" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#'+fbMkr+')" opacity="'+lineOpacity(['HSN_R','HSE_R','HSS_R'], 0.7, 0.08)+'"/>';
+                svg += '<text x="'+((mRx+38+rx_hs)/2)+'" y="'+(retY+12)+'" text-anchor="middle" fill="'+lineColor(['HSN_R','HSE_R','HSS_R'], fbCol, '#7b8794')+'" font-size="5.5" opacity="'+lineOpacity(['HSN_R','HSE_R','HSS_R'], 0.7, 0.2)+'">horiz\u2192HS</text>';
+                svg += '<path d="M'+(mRx+38)+' '+retY+' Q '+rx_vs+' '+(retY+25)+' '+rx_vs+' '+vsBot+'" fill="none" stroke="'+lineColor(['VS1_R','VS2_R','VS3_R','VS4_R'], fbCol, '#455a64')+'" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#'+fbMkr+')" opacity="'+lineOpacity(['VS1_R','VS2_R','VS3_R','VS4_R'], 0.7, 0.08)+'"/>';
+                svg += '<text x="'+((mRx+38+rx_vs)/2)+'" y="'+(retY+22)+'" text-anchor="middle" fill="'+lineColor(['VS1_R','VS2_R','VS3_R','VS4_R'], fbCol, '#7b8794')+'" font-size="5.5" opacity="'+lineOpacity(['VS1_R','VS2_R','VS3_R','VS4_R'], 0.7, 0.2)+'">vert\u2192VS</text>';
+
+                svg += '<text x="'+W/2+'" y="'+(retY+38)+'" text-anchor="middle" fill="#26c6da" font-size="9" font-weight="bold" opacity="0.6">\u27f2 VISUOMOTOR FEEDBACK: muscles \u2192 retinal shift \u2192 visual scene \u2192 LPTC</text>';
+                svg += '<text x="10" y="'+(H-54)+'" fill="#888" font-size="8">GJ (green dashed): LPTC chains = axo-axonal | LPTC\u2194MN = axon\u2194dendrite (bidirectional, LP-filtered)</text>';
+                svg += '<text x="10" y="'+(H-42)+'" fill="#888" font-size="8">Chem syn: LPTC\u2194LPTC = dendro-dendritic | LPTC\u2192MN = axon\u2192dendrite | BIPS\u2192HS = axon\u2192dendrite</text>';
+                svg += '<text x="10" y="'+(H-30)+'" fill="#888" font-size="8">Synapse kinetics: Graded (LPTC pre) / Alpha (MN pre) | E_rev: ACh/Glut=0mV, GABA=\u221280mV</text>';
+                svg += '<text x="10" y="'+(H-18)+'" fill="#888" font-size="8">Orange = motor output to muscle | Cyan dashed = visuomotor feedback (muscle\u2192retina\u2192LPTC)</text>';
+                svg += '<line x1="'+(W-200)+'" y1="'+(H-52)+'" x2="'+(W-170)+'" y2="'+(H-52)+'" stroke="'+CGJ+'" stroke-width="2" stroke-dasharray="5,3"/>';
+                svg += '<text x="'+(W-165)+'" y="'+(H-49)+'" fill="'+CGJ+'" font-size="8">Bidirectional GJ</text>';
+                svg += '<line x1="'+(W-200)+'" y1="'+(H-40)+'" x2="'+(W-170)+'" y2="'+(H-40)+'" stroke="'+CCHEM+'" stroke-width="2"/>';
+                svg += '<text x="'+(W-165)+'" y="'+(H-37)+'" fill="'+CCHEM+'" font-size="8">Chemical synapse</text>';
+                svg += '<line x1="'+(W-200)+'" y1="'+(H-28)+'" x2="'+(W-170)+'" y2="'+(H-28)+'" stroke="#ff8a65" stroke-width="2"/>';
+                svg += '<text x="'+(W-165)+'" y="'+(H-25)+'" fill="#ff8a65" font-size="8">Motor output</text>';
+                svg += '<line x1="'+(W-200)+'" y1="'+(H-16)+'" x2="'+(W-170)+'" y2="'+(H-16)+'" stroke="#26c6da" stroke-width="2" stroke-dasharray="4,3"/>';
+                svg += '<text x="'+(W-165)+'" y="'+(H-13)+'" fill="#26c6da" font-size="8">Sensory feedback</text>';
                 svg += '</svg>';
-                document.getElementById('wiringDiagram').innerHTML = svg;
-            })();
+                const wiringEl = document.getElementById('wiringDiagram');
+                wiringEl.innerHTML = svg;
+                wiringEl.querySelectorAll('.circuit-node[data-neuron]').forEach(nodeEl => {
+                    nodeEl.addEventListener('click', function() {
+                        const name = this.dataset.neuron;
+                        if (!name) return;
+                        if (circuitDisabledNodes.has(name)) circuitDisabledNodes.delete(name);
+                        else circuitDisabledNodes.add(name);
+                        updateCircuitToggleStatus();
+                        drawWiring();
+                    });
+                });
+                updateCircuitToggleStatus();
+            } catch(e) { console.error('drawWiring error:', e); }
+            }
+
+            drawWiring();
 
             // ── Wire up controls ──
             const stimGroupMap = {
@@ -2071,24 +2886,62 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 'HS_L':  ['HSN_L','HSE_L','HSS_L'],
                 'HS_R':  ['HSN_R','HSE_R','HSS_R'],
                 'ALL_L': ['VS1_L','VS2_L','VS3_L','VS4_L','HSN_L','HSE_L','HSS_L'],
+                'ALL_R': ['VS1_R','VS2_R','VS3_R','VS4_R','HSN_R','HSE_R','HSS_R'],
                 'MN_L':  ['MOS_L','MOT_L'],
+                'MN_R':  ['MOS_R','MOT_R'],
             };
 
             function readParams() {
-                stimTargets = stimGroupMap[document.getElementById('circStimGroup').value] || stimTargets;
-                stimAmp   = parseFloat(document.getElementById('circStimAmp').value)   || 10;
-                simTime   = parseFloat(document.getElementById('circSimTime').value)    || 1500;
-                stimStart = parseFloat(document.getElementById('circStimStart').value)  || 90;
-                stimEnd   = parseFloat(document.getElementById('circStimEnd').value)    || 590;
-                noiseLevel= parseFloat(document.getElementById('circNoise').value)      || 3;
-                pGlptc  = parseFloat(document.getElementById('pGlptc').value)  || 0.05;
-                pClptc  = parseFloat(document.getElementById('pClptc').value)  || 0.05;
-                pGmn    = parseFloat(document.getElementById('pGmn').value)    || 0.1;
-                pCmn    = parseFloat(document.getElementById('pCmn').value)    || 0.8;
-                pGgrad  = parseFloat(document.getElementById('pGgrad').value)  || 0.005;
-                pGspike = parseFloat(document.getElementById('pGspike').value) || 0.02;
-                pTauSyn = parseFloat(document.getElementById('pTauSyn').value) || 5;
+                const pf = (id, def) => { const v = parseFloat(document.getElementById(id).value); return isNaN(v) ? def : v; };
+                // Multi-select: expand group keys to neuron lists, or use individual name directly
+                const sel = document.getElementById('circStimGroup');
+                stimTargets = Array.from(sel.selectedOptions)
+                    .flatMap(o => stimGroupMap[o.value] || [o.value])
+                    .filter((name, index, arr) => arr.indexOf(name) === index && !circuitDisabledNodes.has(name));
+                stimAmp    = pf('circStimAmp',  10);
+                simTime    = pf('circSimTime',  1500);
+                stimStart  = pf('circStimStart', 90);
+                stimEnd    = pf('circStimEnd',   590);
+                noiseLevel = pf('circNoise',     3);
+                // MN cell params
+                pVLm     = pf('pVLm',    -65);
+                pGNaP    = pf('pGNaP',   0.5);
+                pGNa     = pf('pGNa',    120);
+                pGK_m    = pf('pGKm',    36);
+                pGL_m    = pf('pGLm',    0.3);
+                pRinM    = pf('pRinM',   300);
+                pIbias_m = pf('pIbiasM', 0);
+                pGVT_m   = pf('pGVTm',   0.0);
+                // LPTC cell params
+                pVrVS1   = pf('pVrVS1',  -40);
+                pVrHS    = pf('pVrHS',   -45);
+                pGVT_l   = pf('pGVTl',   0.5);
+                pGK_l    = pf('pGKl',    2.0);
+                pGL_l    = pf('pGLl',    0.05);
+                pRinHS   = pf('pRinHS',  150);
+                pRinVS1  = pf('pRinVS1', 150);
+                // GJ params
+                pGlptc   = pf('pGlptc',   0.05);
+                pClptc   = pf('pClptc',   0.05);
+                pGvsmos  = pf('pGvsmos',  0.1);
+                pGhsmos  = pf('pGhsmos',  0.1);
+                pGhsmot  = pf('pGhsmot',  0.1);
+                pCmn     = pf('pCmn',     0.8);
+                // Synapse params
+                pGgradExc  = pf('pGgradExc',  0.005);
+                pGgradInh  = pf('pGgradInh',  0.004);
+                pGspikeExc = pf('pGspikeExc', 0.02);
+                pGspikeInh = pf('pGspikeInh', 0.016);
+                pTauSyn  = pf('pTauSyn',  5);
+                pVthresh = pf('pVthresh', -40);
+                pVscale  = pf('pVscale',   20);
             }
+
+            document.getElementById('circResetNodes').addEventListener('click', function() {
+                circuitDisabledNodes.clear();
+                updateCircuitToggleStatus();
+                drawWiring();
+            });
 
             document.getElementById('circRun').addEventListener('click', function() {
                 readParams();
@@ -2164,12 +3017,926 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     legend: { font: { size: 9, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.5)' },
                     margin: { l: 40, r: 10, t: 26, b: 30 },
                 }, { responsive: true });
+
+                // Toy motor-output model: robust rate extraction + smoothed pupil kinematics.
+                function lowpass1(v, dtMs, tauMs) {
+                    const out = new Float32Array(v.length);
+                    if (!v.length) return out;
+                    out[0] = v[0];
+                    const a = dtMs / Math.max(dtMs, tauMs);
+                    for (let i = 1; i < v.length; i++) out[i] = out[i - 1] + a * (v[i] - out[i - 1]);
+                    return out;
+                }
+                function median(arr) {
+                    if (!arr.length) return 0;
+                    const s = arr.slice().sort((a, b) => a - b);
+                    const m = Math.floor(s.length / 2);
+                    return (s.length % 2) ? s[m] : 0.5 * (s[m - 1] + s[m]);
+                }
+                function quantile(arr, q) {
+                    if (!arr.length) return 0;
+                    const s = arr.slice().sort((a, b) => a - b);
+                    const p = Math.min(s.length - 1, Math.max(0, Math.floor(q * (s.length - 1))));
+                    return s[p];
+                }
+                function robustSpikeRateSeries(v, t, winMs) {
+                    const dtMs = (t.length > 1) ? (t[1] - t[0]) : 0.01;
+                    const vf = lowpass1(v, dtMs, 0.9);    // keep spike crest shape
+                    const vSlow = lowpass1(vf, dtMs, 35.0);
+                    const hp = new Float32Array(v.length);
+                    const hpAbs = [];
+                    for (let i = 0; i < v.length; i++) {
+                        hp[i] = vf[i] - vSlow[i];
+                        hpAbs.push(Math.abs(hp[i]));
+                    }
+
+                    const q10 = quantile(Array.from(vf), 0.10);
+                    const q90 = quantile(Array.from(vf), 0.90);
+                    const span = Math.max(2.0, q90 - q10);
+                    const thr = q10 + 0.52 * span;
+
+                    const dv = new Float32Array(v.length);
+                    for (let i = 1; i < v.length; i++) dv[i] = (vf[i] - vf[i - 1]) / dtMs;
+                    const dvThr = Math.max(0.25, 0.85 * quantile(Array.from(dv).map(x => Math.abs(x)), 0.80));
+                    const hpThr = Math.max(0.2, 0.9 * quantile(hpAbs, 0.70));
+
+                    const spikes = new Float32Array(v.length);
+                    const refractory = Math.max(1, Math.round(4.5 / dtMs));
+                    let lastSpike = -refractory;
+
+                    for (let i = 2; i < v.length - 2; i++) {
+                        const upwardCross = (vf[i - 1] < thr && vf[i] >= thr);
+                        const localPeak = (vf[i] >= vf[i - 1] && vf[i] > vf[i + 1]);
+                        const steepEnough = (dv[i] > dvThr || dv[i - 1] > dvThr);
+                        const prominent = hp[i] > hpThr;
+                        if (!(upwardCross || (localPeak && steepEnough && prominent))) continue;
+                        if (i - lastSpike < refractory) continue;
+                        spikes[i] = 1;
+                        lastSpike = i;
+                    }
+
+                    const half = Math.max(1, Math.round((winMs / dtMs) / 2));
+                    const prefix = new Float32Array(v.length + 1);
+                    for (let i = 0; i < v.length; i++) prefix[i + 1] = prefix[i] + spikes[i];
+                    const hzRaw = new Float32Array(v.length);
+                    for (let i = 0; i < v.length; i++) {
+                        const a = Math.max(0, i - half), b = Math.min(v.length - 1, i + half);
+                        const nsp = prefix[b + 1] - prefix[a];
+                        const durS = Math.max(1e-6, (b - a + 1) * dtMs / 1000);
+                        hzRaw[i] = nsp / durS;
+                    }
+                    return lowpass1(hzRaw, dtMs, 180.0);
+                }
+                function meanPre(arr, t, t0) {
+                    let s = 0, c = 0;
+                    for (let i = 0; i < arr.length; i++) if (t[i] < t0) { s += arr[i]; c++; }
+                    return c ? s / c : 0;
+                }
+                function satPull(d, scale) {
+                    if (d <= 0) return 0;
+                    return 8 * (d / (d + scale));
+                }
+                function satRelease(d, scale) {
+                    if (d <= 0) return 0;
+                    return 8 * (d / (d + scale));
+                }
+                function addPolar(vec, mag, thetaDeg) {
+                    const th = thetaDeg * Math.PI / 180;
+                    vec.x += mag * Math.cos(th);
+                    vec.y += mag * Math.sin(th);
+                }
+                function mirrorRightToLeft(thetaDeg) {
+                    return (180 - thetaDeg + 360) % 360;
+                }
+                function buildPupilMotion(sideTag, mosRate, motRate) {
+                    // Right-eye calibration (deg): 0° = rightward/front for right eye.
+                    const rightCal = {
+                        mosPull: 50.582827,
+                        mosRelease: 204.228953,
+                        bothPull: 354.23147,
+                        bothRelease: 161.518836,
+                        motRelease: 116.555959,
+                        motPull: 320.258203,
+                    };
+                    const cal = (sideTag === 'R') ? rightCal : {
+                        mosPull: mirrorRightToLeft(rightCal.mosPull),
+                        mosRelease: mirrorRightToLeft(rightCal.mosRelease),
+                        bothPull: mirrorRightToLeft(rightCal.bothPull),
+                        bothRelease: mirrorRightToLeft(rightCal.bothRelease),
+                        motRelease: mirrorRightToLeft(rightCal.motRelease),
+                        motPull: mirrorRightToLeft(rightCal.motPull),
+                    };
+                    const bMos = meanPre(mosRate, tMs, stimStart);
+                    const bMot = meanPre(motRate, tMs, stimStart);
+                    const DEAD = 5.0;  // Hz dead-zone: ignore sub-threshold fluctuations
+                    const x = new Float32Array(mosRate.length);
+                    const y = new Float32Array(mosRate.length);
+                    const r = new Float32Array(mosRate.length);
+                    const th = new Float32Array(mosRate.length);
+                    for (let i = 0; i < mosRate.length; i++) {
+                        const rawDMos = mosRate[i] - bMos;
+                        const rawDMot = motRate[i] - bMot;
+                        // Dead-zone: treat small fluctuations as zero
+                        const dMos = Math.abs(rawDMos) < DEAD ? 0 : rawDMos - Math.sign(rawDMos) * DEAD;
+                        const dMot = Math.abs(rawDMot) < DEAD ? 0 : rawDMot - Math.sign(rawDMot) * DEAD;
+
+                        const vec = { x: 0, y: 0 };
+
+                        // Individual component pulls/releases
+                        addPolar(vec, satPull(Math.max(0, dMos), 40), cal.mosPull);
+                        addPolar(vec, satRelease(Math.max(0, -dMos), 26), cal.mosRelease);
+                        addPolar(vec, satPull(Math.max(0, dMot), 40), cal.motPull);
+                        addPolar(vec, satRelease(Math.max(0, -dMot), 26), cal.motRelease);
+
+                        // Cooperative term when both rise/fall together
+                        const bothUp = Math.min(Math.max(0, dMos), Math.max(0, dMot));
+                        const bothDown = Math.min(Math.max(0, -dMos), Math.max(0, -dMot));
+                        addPolar(vec, satPull(bothUp, 50), cal.bothPull);
+                        addPolar(vec, satRelease(bothDown, 34), cal.bothRelease);
+
+                        // Spike-like jitter: converts rate transients into small scanpath wiggles.
+                        const dMosRate = (i > 0) ? Math.abs(mosRate[i] - mosRate[i - 1]) : 0;
+                        const dMotRate = (i > 0) ? Math.abs(motRate[i] - motRate[i - 1]) : 0;
+                        const transient = Math.min(1.0, (dMosRate + dMotRate) / 18.0);
+                        const drive = Math.min(1.0, (Math.abs(dMos) + Math.abs(dMot)) / 70.0);
+                        const jitterMag = 0.55 * transient * (0.3 + 0.7 * drive);
+                        if (jitterMag > 1e-4) {
+                            const seed = (sideTag === 'R') ? 0.91 : 0.37;
+                            const jitterTheta = (180 / Math.PI) * (
+                                2.1 * Math.sin(0.33 * i + seed) +
+                                1.3 * Math.sin(0.91 * i + 0.7 + seed)
+                            );
+                            addPolar(vec, jitterMag, (jitterTheta + 360) % 360);
+                        }
+
+                        let px = vec.x;
+                        let py = vec.y;
+                        let rr = Math.sqrt(px * px + py * py);
+                        if (rr > 10) { px *= 10 / rr; py *= 10 / rr; rr = 10; }
+                        x[i] = px; y[i] = py; r[i] = rr;
+                        th[i] = (Math.atan2(py, px) * 180 / Math.PI + 360) % 360;
+                    }
+                    return { x, y, r, th };
+                }
+                function overallVector(move) {
+                    const n = move.x.length;
+                    const k = Math.max(5, Math.floor(0.1 * n));
+                    let x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                    for (let i = 0; i < k; i++) { x0 += move.x[i]; y0 += move.y[i]; }
+                    for (let i = n - k; i < n; i++) { x1 += move.x[i]; y1 += move.y[i]; }
+                    x0 /= k; y0 /= k; x1 /= k; y1 /= k;
+                    const dx = x1 - x0, dy = y1 - y0;
+                    return {
+                        theta: (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360,
+                        r: Math.min(10, Math.sqrt(dx * dx + dy * dy))
+                    };
+                }
+
+                const rateMOS_L = robustSpikeRateSeries(res.records['MOS_L'], tMs, 90);
+                const rateMOS_R = robustSpikeRateSeries(res.records['MOS_R'], tMs, 90);
+                const rateMOT_L = robustSpikeRateSeries(res.records['MOT_L'], tMs, 90);
+                const rateMOT_R = robustSpikeRateSeries(res.records['MOT_R'], tMs, 90);
+                const moveL = buildPupilMotion('L', rateMOS_L, rateMOT_L);
+                const moveR = buildPupilMotion('R', rateMOS_R, rateMOT_R);
+                const vecL = overallVector(moveL), vecR = overallVector(moveR);
+
+                Plotly.react('circPlotPupilTime', [
+                    { x: tPlot, y: indices.map(i => rateMOS_L[i]), name: 'MOS_L rate', type: 'scatter', mode: 'lines', line: { color: '#ef5350', width: 1.1 } },
+                    { x: tPlot, y: indices.map(i => rateMOT_L[i]), name: 'MOT_L rate', type: 'scatter', mode: 'lines', line: { color: '#ff7043', width: 1.1 } },
+                    { x: tPlot, y: indices.map(i => rateMOS_R[i]), name: 'MOS_R rate', type: 'scatter', mode: 'lines', line: { color: '#e53935', width: 1.1, dash: 'dot' } },
+                    { x: tPlot, y: indices.map(i => rateMOT_R[i]), name: 'MOT_R rate', type: 'scatter', mode: 'lines', line: { color: '#ff5722', width: 1.1, dash: 'dot' } },
+                    { x: tPlot, y: indices.map(i => moveL.r[i]), name: 'Left pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#80cbc4', width: 1.6 } },
+                    { x: tPlot, y: indices.map(i => moveR.r[i]), name: 'Right pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#29b6f6', width: 1.6 } },
+                    {
+                        x: [stimStart, stimEnd, stimEnd, stimStart], y: [0, 0, 250, 250],
+                        fill: 'toself', fillcolor: 'rgba(255,255,0,0.06)', line: { width: 0 },
+                        showlegend: false, hoverinfo: 'skip', type: 'scatter', mode: 'lines'
+                    }
+                ], {
+                    title: { text: 'Pseudopupil Output (Both Eyes, Same Time Axis as MN)', font: { size: 11, color: '#ccc' } },
+                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333', range: [0, simTime] },
+                    yaxis: { title: 'Hz', color: '#888', gridcolor: '#333', rangemode: 'tozero' },
+                    yaxis2: { title: 'deg', overlaying: 'y', side: 'right', color: '#26c6da', range: [0, 10] },
+                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
+                    legend: { font: { size: 8, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.4)' },
+                    margin: { l: 38, r: 44, t: 24, b: 28 },
+                }, { responsive: true });
+
+                const sampleStep = Math.max(1, Math.floor(indices.length / 520));
+                const thR = [], rR = [], thL = [], rL = [];
+                for (let i = 0; i < indices.length; i += sampleStep) {
+                    const j = indices[i];
+                    thR.push(moveR.th[j]); rR.push(moveR.r[j]);
+                    thL.push(moveL.th[j]); rL.push(moveL.r[j]);
+                }
+                Plotly.react('circPlotPupilPolar', [
+                    { type: 'scatterpolar', subplot: 'polar', mode: 'lines+markers', theta: thR, r: rR, name: 'Right trajectory', line: { color: '#29b6f6', width: 1.6 }, marker: { color: '#29b6f6', size: 3, opacity: 0.7 } },
+                    { type: 'barpolar', subplot: 'polar', theta: thR, r: rR, width: thR.map(() => 3), opacity: 0.22, marker: { color: '#29b6f6' }, name: 'Right path vectors' },
+                    { type: 'barpolar', subplot: 'polar', theta: [vecR.theta], r: [vecR.r], width: [16], opacity: 0.95, marker: { color: '#00e5ff' }, name: 'Right net direction' },
+                    { type: 'scatterpolar', subplot: 'polar2', mode: 'lines+markers', theta: thL, r: rL, name: 'Left trajectory', line: { color: '#80cbc4', width: 1.6 }, marker: { color: '#80cbc4', size: 3, opacity: 0.7 } },
+                    { type: 'barpolar', subplot: 'polar2', theta: thL, r: rL, width: thL.map(() => 3), opacity: 0.22, marker: { color: '#80cbc4' }, name: 'Left path vectors' },
+                    { type: 'barpolar', subplot: 'polar2', theta: [vecL.theta], r: [vecL.r], width: [16], opacity: 0.95, marker: { color: '#76ff03' }, name: 'Left net direction' }
+                ], {
+                    title: { text: 'Pseudopupil Direction Vectors (Toy Model)', font: { size: 11, color: '#ccc' } },
+                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
+                    polar: {
+                        domain: { x: [0.0, 0.48], y: [0, 1] },
+                        bgcolor: '#1a1a1a', radialaxis: { range: [0, 10], color: '#888', gridcolor: '#333' },
+                        angularaxis: { direction: 'counterclockwise', color: '#888', gridcolor: '#333' }
+                    },
+                    polar2: {
+                        domain: { x: [0.52, 1.0], y: [0, 1] },
+                        bgcolor: '#1a1a1a', radialaxis: { range: [0, 10], color: '#888', gridcolor: '#333' },
+                        angularaxis: { direction: 'counterclockwise', color: '#888', gridcolor: '#333' }
+                    },
+                    annotations: [
+                        { text: 'Right eye (0° = front→middle)', x: 0.24, y: 1.08, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#29b6f6', size: 10 } },
+                        { text: 'Left eye (180° = front→middle)', x: 0.76, y: 1.08, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#80cbc4', size: 10 } }
+                    ],
+                    legend: { font: { size: 8, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.4)' },
+                    margin: { l: 20, r: 20, t: 40, b: 20 }
+                }, { responsive: true });
             }
 
-            // Auto-run on init
-            readParams();
-            const res = buildAndRun();
-            plotResults(res);
+            // Auto-run on init (deferred to avoid blocking UI)
+            setTimeout(() => {
+                try {
+                    readParams();
+                    const res = buildAndRun();
+                    plotResults(res);
+                } catch(e) { console.error('Tier 1 circuit init error:', e); }
+            }, 80);
+        }
+
+        // ── Multi-Compartment (Tier 2) model ─────────────────────────
+        let mcInitialized = false;
+        function renderMCModel() {
+            if (mcInitialized) return;
+            mcInitialized = true;
+            const mcCont = document.getElementById('mcContainer');
+            if (!mcCont) return;
+
+            // ── Cell index helpers (same CI used globally) ──
+            const isLPTC_ = n => n.startsWith('VS') || n.startsWith('HS');
+            const isMN_   = n => n.startsWith('MO');
+
+            // ── Build UI ──
+            let h2 = '<div style="display:flex;flex-direction:column;gap:6px;">';
+
+            // Wiring diagram placeholder
+            h2 += '<div id="mcWiring" style="background:#1a1a2e;border:1px solid #444;border-radius:4px;padding:8px;overflow-x:auto;"></div>';
+
+            // Stim controls
+            h2 += '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;padding:4px 0;">';
+            h2 += '<label style="color:#ccc;font-size:11px;display:flex;flex-direction:column;gap:2px;">'
+                + '<span>Stim targets <span style="color:#888;font-size:9px;">(Ctrl/\u2318 multi)</span></span>'
+                + '<select id="mcStimGroup" multiple size="6" style="background:#1e1e1e;color:#fff;border:1px solid #555;font-size:10px;min-width:110px;">'
+                + '<optgroup label="\u2014 Groups \u2014" style="color:#888;">'
+                + '<option value="VS_L" selected>VS Left (1-4)</option>'
+                + '<option value="VS_R">VS Right (1-4)</option>'
+                + '<option value="HS_L">HS Left</option>'
+                + '<option value="HS_R">HS Right</option>'
+                + '</optgroup>'
+                + '<optgroup label="\u2014 VS \u2014" style="color:#888;">'
+                + '<option value="VS1_L">VS1_L</option><option value="VS1_R">VS1_R</option>'
+                + '<option value="VS2_L">VS2_L</option><option value="VS2_R">VS2_R</option>'
+                + '<option value="VS3_L">VS3_L</option><option value="VS3_R">VS3_R</option>'
+                + '<option value="VS4_L">VS4_L</option><option value="VS4_R">VS4_R</option>'
+                + '</optgroup>'
+                + '<optgroup label="\u2014 HS \u2014" style="color:#888;">'
+                + '<option value="HSN_L">HSN_L</option><option value="HSN_R">HSN_R</option>'
+                + '<option value="HSE_L">HSE_L</option><option value="HSE_R">HSE_R</option>'
+                + '<option value="HSS_L">HSS_L</option><option value="HSS_R">HSS_R</option>'
+                + '</optgroup>'
+                + '</select></label>';
+            h2 += '<div style="display:flex;flex-direction:column;gap:4px;">';
+            h2 += '<label style="color:#ccc;font-size:10px;">Amp (nA): <input id="mcAmp" type="number" value="10" step="1" min="-100" max="100" style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#ccc;font-size:10px;">t<sub>start</sub>: <input id="mcTstart" type="number" value="90" step="10" min="0" max="8000" style="width:55px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#ccc;font-size:10px;">t<sub>end</sub>: <input id="mcTend" type="number" value="590" step="10" min="0" max="8000" style="width:55px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#ccc;font-size:10px;">T<sub>max</sub>: <input id="mcTmax" type="number" value="1500" step="100" min="100" max="10000" style="width:55px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#ccc;font-size:10px;">Noise: <input id="mcNoise" type="number" value="3" step="0.5" min="0" max="10" style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<button id="mcRun" style="background:#2E7D32;color:#fff;border:1px solid #4CAF50;padding:4px 14px;border-radius:3px;cursor:pointer;font-size:11px;font-weight:bold;">\u25b6 Run</button>';
+            h2 += '</div></div>';
+
+            // MC-specific params
+            h2 += '<details style="color:#aaa;font-size:10px;"><summary style="cursor:pointer;color:#80cbc4;">MC Parameters (axial conductance &amp; compartment capacitance)</summary>';
+            h2 += '<div style="display:flex;gap:8px;flex-wrap:wrap;padding:4px 0;">';
+            h2 += '<label style="color:#80cbc4;font-size:10px;">G<sub>ax</sub>-LPTC (nS): <input id="mcGaxL" type="number" value="1.0" step="0.1" min="0.01" max="10" style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#80cbc4;font-size:10px;">G<sub>ax</sub>-MN (nS): <input id="mcGaxM" type="number" value="0.5" step="0.1" min="0.01" max="10" style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#80cbc4;font-size:10px;">C<sub>dend</sub> (pF): <input id="mcCdend" type="number" value="0.5" step="0.1" min="0.05" max="5" style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#80cbc4;font-size:10px;">C<sub>soma</sub> (pF): <input id="mcCsoma" type="number" value="0.3" step="0.05" min="0.05" max="5" style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#80cbc4;font-size:10px;">C<sub>axon</sub> (pF): <input id="mcCaxon" type="number" value="0.5" step="0.1" min="0.05" max="5" style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '<label style="color:#80cbc4;font-size:10px;">\u03c4<sub>muscle</sub> (ms): <input id="mcTauMuscle" type="number" value="50" step="5" min="5" max="500" style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            h2 += '</div></details>';
+
+            // Plot areas
+            h2 += '<div style="color:#888;font-size:10px;padding:2px 0;">LPTC soma Vm \u2014 all VS &amp; HS cells</div>';
+            h2 += '<div id="mcPlotLPTC" style="width:100%;height:160px;background:#1a1a1a;border:1px solid #444;"></div>';
+            h2 += '<div style="color:#888;font-size:10px;padding:2px 0;">MN compartments \u2014 MOS &amp; MOT (dotted=dend, dashed=soma, solid=axon)</div>';
+            h2 += '<div id="mcPlotMN" style="width:100%;height:200px;background:#1a1a1a;border:1px solid #444;"></div>';
+            h2 += '<div style="color:#888;font-size:10px;padding:2px 0;">Motor output \u2014 MOS axis vs MOT axis (orthogonal eye movement)</div>';
+            h2 += '<div id="mcPlotMuscle" style="width:100%;height:130px;background:#1a1a1a;border:1px solid #444;"></div>';
+            h2 += '<div style="color:#888;font-size:10px;padding:2px 0;">2D eye direction \u2014 MOS horizontal, MOT vertical (vector sum L\u2212R)</div>';
+            h2 += '<div id="mcPlotEyeDir" style="width:100%;height:160px;background:#1a1a1a;border:1px solid #444;"></div>';
+            h2 += '</div>';
+
+            mcCont.innerHTML = h2;
+
+            // ── Draw MC wiring diagram ──
+            (function drawMCWiring() {
+                const W = 880, H = 530;
+                const CGJ = '#aed581', CCHEM = '#ffcc02', CT = '#ccc';
+                let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;max-height:530px;font-family:sans-serif;">';
+                svg += '<rect width="' + W + '" height="' + H + '" fill="#1a1a2e"/>';
+                svg += '<text x="' + (W/2) + '" y="16" text-anchor="middle" fill="' + CT + '" font-size="12" font-weight="bold">Multi-Compartment Wiring (Tier 2)</text>';
+                svg += '<text x="' + (W/2) + '" y="28" text-anchor="middle" fill="#888" font-size="8">D=dendrite S=soma A=axon | axo-axonal GJ in LPTC chains | LPTC\u2194MN = axon\u2194dendrite GJ | LPTC\u2194LPTC syn = dendro-dendritic</text>';
+
+                const pos = {};
+                const vs_ys = [60, 120, 180, 240], hs_ys = [60, 120, 180];
+                for (let k = 0; k < 4; k++) { pos['VS'+(k+1)+'_L'] = [55, vs_ys[k]]; pos['VS'+(k+1)+'_R'] = [W-55, vs_ys[k]]; }
+                ['HSN','HSE','HSS'].forEach((h,i) => { pos[h+'_L'] = [165, hs_ys[i]]; pos[h+'_R'] = [W-165, hs_ys[i]]; });
+                pos['MOS_L'] = [295, 90]; pos['MOT_L'] = [295, 210];
+                pos['MOS_R'] = [W-295, 90]; pos['MOT_R'] = [W-295, 210];
+                pos['BIPS_L'] = [165, 260]; pos['BIPS_R'] = [W-165, 260];
+                pos['H2_L'] = [(165 + 295) / 2, 48]; pos['H2_R'] = [W - (165 + 295) / 2, 48];
+
+                // 3-sub-box layout per cell
+                const cW = 18, cH = 20, cGap = 2, totW = 3*cW + 2*cGap;
+                function axonXc(name) { return pos[name][0] - totW/2 + 2*(cW+cGap) + cW/2; }
+                function dendXc(name) { return pos[name][0] - totW/2 + cW/2; }
+                function cellYc(name) { return pos[name][1]; }
+
+                CELL_NAMES.forEach(name => {
+                    const p = pos[name]; if (!p) return;
+                    const col = neuronColors[name] || '#999';
+                    const x0 = p[0] - totW/2, y0 = p[1] - cH/2;
+                    svg += '<text x="' + p[0] + '" y="' + (y0-3) + '" text-anchor="middle" fill="' + col + '" font-size="6.5" font-weight="bold">' + name + '</text>';
+                    ['D','S','A'].forEach((lbl, k) => {
+                        const cx = x0 + k*(cW+cGap);
+                        const op = k===2 ? 1.0 : 0.55, sw = k===2 ? 1.5 : 0.8;
+                        svg += '<rect x="' + cx + '" y="' + y0 + '" width="' + cW + '" height="' + cH + '" rx="2" fill="#0d1b2e" stroke="' + col + '" stroke-width="' + sw + '" opacity="' + op + '"/>';
+                        svg += '<text x="' + (cx+cW/2) + '" y="' + (y0+cH/2+3.5) + '" text-anchor="middle" fill="' + col + '" font-size="7" opacity="' + op + '">' + lbl + '</text>';
+                    });
+                });
+
+                // Axo-axonal GJs within LPTC chains
+                function axonGJ(a, b) {
+                    const x1=axonXc(a),y1=cellYc(a),x2=axonXc(b),y2=cellYc(b);
+                    svg += '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="'+CGJ+'" stroke-width="1.5" stroke-dasharray="4,3"/>';
+                    const mx=(x1+x2)/2, my=(y1+y2)/2;
+                    svg += '<line x1="'+(mx-4)+'" y1="'+my+'" x2="'+(mx+4)+'" y2="'+my+'" stroke="'+CGJ+'" stroke-width="2.5"/>';
+                }
+                ['L','R'].forEach(s => {
+                    for (let k=1;k<=3;k++) axonGJ('VS'+k+'_'+s,'VS'+(k+1)+'_'+s);
+                    axonGJ('HSN_'+s,'HSE_'+s); axonGJ('HSE_'+s,'HSS_'+s);
+                });
+
+                // H2 ↔ contralateral HS GJ (crossing midline)
+                function mc_contraGJ(a, b) {
+                    const p1=pos[a], p2=pos[b];
+                    if (!p1||!p2) return;
+                    const mx=W/2, my=Math.min(p1[1],p2[1])-15;
+                    const x1=axonXc(a),y1=cellYc(a),x2=axonXc(b),y2=cellYc(b);
+                    svg+='<path d="M'+x1+','+y1+' Q'+mx+','+my+' '+x2+','+y2+'" '
+                        +'fill="none" stroke="'+CGJ+'" stroke-width="1.2" stroke-dasharray="5,3" opacity="0.5"/>';
+                }
+                ['HSN','HSE','HSS'].forEach(h => {
+                    mc_contraGJ('H2_L', h+'_R');
+                    mc_contraGJ('H2_R', h+'_L');
+                });
+
+                // LPTC-axon <-> MN-dend GJ (dashed, shorter)
+                function lmGJ(lptc, mn) {
+                    const x1=axonXc(lptc),y1=cellYc(lptc),x2=dendXc(mn),y2=cellYc(mn);
+                    svg += '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="'+CGJ+'" stroke-width="0.8" stroke-dasharray="3,4" opacity="0.55"/>';
+                }
+                ['L','R'].forEach(s => {
+                    for (let k=1;k<=4;k++) lmGJ('VS'+k+'_'+s,'MOS_'+s);
+                    ['HSN','HSE','HSS'].forEach(h => { lmGJ(h+'_'+s,'MOS_'+s); lmGJ(h+'_'+s,'MOT_'+s); });
+                });
+
+                // ── Compartment logic: determine pre/post compartments per pair ──
+                function _grp(n) {
+                    if (n.startsWith('VS')) return 'VS';
+                    if (n.startsWith('HS')) return 'HS';
+                    if (n.startsWith('MOS')) return 'MOS';
+                    if (n.startsWith('MOT')) return 'MOT';
+                    if (n.startsWith('BIPS')) return 'BIPS';
+                    if (n.startsWith('H2'))  return 'H2';
+                    return '?';
+                }
+                function _isLPTC(g) { return g==='VS'||g==='HS'; }
+                function _isMN(g)   { return g==='MOS'||g==='MOT'; }
+                // Returns {src:'axon'|'dend', tgt:'axon'|'dend'}
+                function synComp(pre, post) {
+                    const gP=_grp(pre), gQ=_grp(post);
+                    // LPTC ↔ LPTC (same or different type): dendro-dendritic
+                    if (_isLPTC(gP) && _isLPTC(gQ)) return {src:'dend',tgt:'dend'};
+                    // LPTC → MN: axo-dendritic
+                    if (_isLPTC(gP) && _isMN(gQ))   return {src:'axon',tgt:'dend'};
+                    // MN → LPTC: axo-dendritic
+                    if (_isMN(gP) && _isLPTC(gQ))   return {src:'axon',tgt:'dend'};
+                    // BIPS → LPTC: axo-dendritic
+                    if (gP==='BIPS' && _isLPTC(gQ)) return {src:'axon',tgt:'dend'};
+                    // LPTC → BIPS: axo-dendritic
+                    if (_isLPTC(gP) && gQ==='BIPS')  return {src:'axon',tgt:'dend'};
+                    // Default: axo-dendritic
+                    return {src:'axon',tgt:'dend'};
+                }
+
+                // Chemical synapses (compartment-aware)
+                for (let pi=0;pi<N_CELLS;pi++) {
+                    for (let qi=0;qi<N_CELLS;qi++) {
+                        const cnt=RAW_COUNTS[pi][qi]; if (!cnt) continue;
+                        const pre=CELL_NAMES[pi], post=CELL_NAMES[qi];
+                        if (!pos[pre]||!pos[post]) continue;
+                        const isInh = SYN_ESYN[pi][qi] < -10;
+                        const col = isInh ? '#64b5f6' : CCHEM;
+                        const comp = synComp(pre, post);
+                        const x1 = comp.src==='axon' ? axonXc(pre) : dendXc(pre);
+                        const y1 = cellYc(pre);
+                        const x2 = comp.tgt==='dend' ? dendXc(post) : axonXc(post);
+                        const y2 = cellYc(post);
+                        const dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy); if(len<4) continue;
+                        const ux=dx/len,uy=dy/len;
+                        const aid='mc_ca_'+pi+'_'+qi;
+                        if (isInh) {
+                            svg+='<defs><marker id="'+aid+'" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><line x1="0" y1="0" x2="0" y2="8" stroke="'+col+'" stroke-width="2"/></marker></defs>';
+                        } else {
+                            svg+='<defs><marker id="'+aid+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="'+col+'"/></marker></defs>';
+                        }
+                        svg+='<line x1="'+(x1+ux*2)+'" y1="'+(y1+uy*2)+'" x2="'+(x2-ux*2)+'" y2="'+(y2-uy*2)+'" stroke="'+col+'" stroke-width="'+Math.max(0.5,Math.sqrt(cnt)*0.35)+'" marker-end="url(#'+aid+')" opacity="0.6"/>';
+                    }
+                }
+
+                // ── Per-eye muscles + retina + visuomotor feedback loop ──
+                const mLx = W/2 - 65, mRx = W/2 + 65;
+                const mHy = pos['MOS_L'][1], mVy = pos['MOT_L'][1];
+
+                function muscleBox(cx, cy, label, sublabel, subCol) {
+                    svg+='<rect x="'+(cx-30)+'" y="'+(cy-14)+'" width="60" height="28" rx="4" fill="#1a1a1a" stroke="#ff8a65" stroke-width="1.5"/>';
+                    svg+='<text x="'+cx+'" y="'+(cy-2)+'" text-anchor="middle" fill="#ff8a65" font-size="7" font-weight="bold">'+label+'</text>';
+                    svg+='<text x="'+cx+'" y="'+(cy+9)+'" text-anchor="middle" fill="'+subCol+'" font-size="5.5">'+sublabel+'</text>';
+                }
+                muscleBox(mLx, mHy, 'L Musc \u2194', 'horiz (MOS)', '#ef5350');
+                muscleBox(mLx, mVy, 'L Musc \u2195', 'vert (MOT)', '#ff7043');
+                muscleBox(mRx, mHy, 'R Musc \u2194', 'horiz (MOS)', '#ef5350');
+                muscleBox(mRx, mVy, 'R Musc \u2195', 'vert (MOT)', '#ff7043');
+
+                // Arrows from MOS/MOT axon → per-eye muscles
+                ['L','R'].forEach(s => {
+                    ['MOS','MOT'].forEach(mn => {
+                        const nName=mn+'_'+s, ax=axonXc(nName), ay=cellYc(nName);
+                        const targX = s==='L' ? mLx : mRx;
+                        const targY = mn==='MOS' ? mHy : mVy;
+                        const x2 = s==='L' ? (targX-30) : (targX+30);
+                        const aid='marr_'+nName;
+                        svg+='<defs><marker id="'+aid+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#ff8a65"/></marker></defs>';
+                        svg+='<line x1="'+ax+'" y1="'+ay+'" x2="'+x2+'" y2="'+targY+'" stroke="#ff8a65" stroke-width="1.5" marker-end="url(#'+aid+')"/>';
+                    });
+                });
+
+                // ── Retina boxes (one per eye) ──
+                const retY = 290;
+                svg+='<rect x="'+(mLx-38)+'" y="'+(retY-12)+'" width="76" height="24" rx="4" fill="#1a1a1a" stroke="#26c6da" stroke-width="1.5" stroke-dasharray="4,2"/>';
+                svg+='<text x="'+mLx+'" y="'+(retY+4)+'" text-anchor="middle" fill="#26c6da" font-size="7.5" font-weight="bold">L Eye / Retina</text>';
+                svg+='<rect x="'+(mRx-38)+'" y="'+(retY-12)+'" width="76" height="24" rx="4" fill="#1a1a1a" stroke="#26c6da" stroke-width="1.5" stroke-dasharray="4,2"/>';
+                svg+='<text x="'+mRx+'" y="'+(retY+4)+'" text-anchor="middle" fill="#26c6da" font-size="7.5" font-weight="bold">R Eye / Retina</text>';
+
+                // Muscle → retina arrows (both muscles move the same eye)
+                const retMkr = 'mc_mret';
+                svg+='<defs><marker id="'+retMkr+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#ff8a65"/></marker></defs>';
+                [mLx, mRx].forEach(mx => {
+                    svg+='<line x1="'+mx+'" y1="'+(mHy+14)+'" x2="'+mx+'" y2="'+(retY-12)+'" stroke="#ff8a65" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#'+retMkr+')" opacity="0.7"/>';
+                    svg+='<line x1="'+mx+'" y1="'+(mVy+14)+'" x2="'+mx+'" y2="'+(retY-12)+'" stroke="#ff8a65" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#'+retMkr+')" opacity="0.7"/>';
+                });
+
+                // ── Sensory feedback: retina → HS (horiz motion) & VS (vert motion) ──
+                const fbCol='#26c6da', fbMkr='mc_sfb';
+                svg+='<defs><marker id="'+fbMkr+'" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="'+fbCol+'"/></marker></defs>';
+                const hsBot2=hs_ys[2]+16, vsBot2=vs_ys[3]+16;
+                // L retina → HS_L
+                svg+='<path d="M'+(mLx-38)+' '+retY+' Q 165 '+(retY+15)+' 165 '+hsBot2+'" fill="none" stroke="'+fbCol+'" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#'+fbMkr+')" opacity="0.7"/>';
+                svg+='<text x="'+((mLx-38+165)/2)+'" y="'+(retY+12)+'" text-anchor="middle" fill="'+fbCol+'" font-size="5.5" opacity="0.7">horiz\u2192HS</text>';
+                // L retina → VS_L
+                svg+='<path d="M'+(mLx-38)+' '+retY+' Q 55 '+(retY+25)+' 55 '+vsBot2+'" fill="none" stroke="'+fbCol+'" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#'+fbMkr+')" opacity="0.7"/>';
+                svg+='<text x="'+((mLx-38+55)/2)+'" y="'+(retY+22)+'" text-anchor="middle" fill="'+fbCol+'" font-size="5.5" opacity="0.7">vert\u2192VS</text>';
+                // R retina → HS_R
+                svg+='<path d="M'+(mRx+38)+' '+retY+' Q '+(W-165)+' '+(retY+15)+' '+(W-165)+' '+hsBot2+'" fill="none" stroke="'+fbCol+'" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#'+fbMkr+')" opacity="0.7"/>';
+                svg+='<text x="'+((mRx+38+W-165)/2)+'" y="'+(retY+12)+'" text-anchor="middle" fill="'+fbCol+'" font-size="5.5" opacity="0.7">horiz\u2192HS</text>';
+                // R retina → VS_R
+                svg+='<path d="M'+(mRx+38)+' '+retY+' Q '+(W-55)+' '+(retY+25)+' '+(W-55)+' '+vsBot2+'" fill="none" stroke="'+fbCol+'" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#'+fbMkr+')" opacity="0.7"/>';
+                svg+='<text x="'+((mRx+38+W-55)/2)+'" y="'+(retY+22)+'" text-anchor="middle" fill="'+fbCol+'" font-size="5.5" opacity="0.7">vert\u2192VS</text>';
+
+                // Feedback loop banner
+                svg+='<text x="'+W/2+'" y="'+(retY+38)+'" text-anchor="middle" fill="#26c6da" font-size="8.5" font-weight="bold" opacity="0.6">\u27f2 VISUOMOTOR FEEDBACK: muscles \u2192 retinal shift \u2192 visual scene \u2192 LPTC</text>';
+
+                svg += '<text x="10" y="'+(H-18)+'" fill="#555" font-size="7">Green dashed = GJ | Yellow = excitatory syn (ACh/Glut) | Blue = inhibitory (GABA) | Orange = motor output</text>';
+                svg += '<text x="10" y="'+(H-6)+'" fill="#555" font-size="7">Cyan dashed = sensory feedback: muscle \u2192 retinal motion \u2192 LPTC input | \u27f2 = closed visuomotor loop</text>';
+                svg += '</svg>';
+                const wd = document.getElementById('mcWiring');
+                if (wd) wd.innerHTML = svg;
+            })();
+
+            // ── Parameter reader ──
+            const mcpf = (id, def) => {
+                const el = document.getElementById(id);
+                const v = el ? parseFloat(el.value) : NaN;
+                return isNaN(v) ? def : v;
+            };
+
+            function readMCParams() {
+                const sel = document.getElementById('mcStimGroup');
+                const grpMap = {
+                    'VS_L':['VS1_L','VS2_L','VS3_L','VS4_L'], 'VS_R':['VS1_R','VS2_R','VS3_R','VS4_R'],
+                    'HS_L':['HSN_L','HSE_L','HSS_L'], 'HS_R':['HSN_R','HSE_R','HSS_R']
+                };
+                return {
+                    amp:    mcpf('mcAmp', 10),
+                    tstart: mcpf('mcTstart', 90),
+                    tend:   mcpf('mcTend', 590),
+                    tmax:   mcpf('mcTmax', 1500),
+                    noise:  mcpf('mcNoise', 3),
+                    gaxL:   mcpf('mcGaxL', 1.0),
+                    gaxM:   mcpf('mcGaxM', 0.5),
+                    cdend:  mcpf('mcCdend', 0.5),
+                    csoma:  mcpf('mcCsoma', 0.3),
+                    caxon:  mcpf('mcCaxon', 0.5),
+                    tauMuscle: mcpf('mcTauMuscle', 50),
+                    targets: Array.from(sel.selectedOptions).flatMap(o => grpMap[o.value] || [o.value]),
+                };
+            }
+
+            // ── Main MC simulation ──
+            function buildAndRunMC(p) {
+                const dt = 0.05;
+                const NT = Math.round(p.tmax / dt);
+                const N  = N_CELLS;
+                const isLPTCa = CELL_NAMES.map(n => isLPTC_(n));
+                const isMNa   = CELL_NAMES.map(n => isMN_(n));
+
+                // Rev potentials
+                const ENa=55, EK=-80, ECa=120;
+
+                // Cell parameters (from Tier 1 defaults)
+                const pGNa=120, pGK_m=36, pGL_m=0.3, pVLm=-65, pGNaP=0.3;
+                const pGVT_l=0.5, pGK_l=2.0, pGL_l=0.05;
+                const pRinVS1=150, pVrVS1=-40, pRinHS=150, pVrHS=-45;
+                const pGlptc=0.05, pClptc=0.05;
+                const pGvsmos=0.1, pGhsmos=0.1, pGhsmot=0.1, pCmn=0.8;
+                const pGgrad=0.005, pGspike=0.02, pTauSyn=5;
+                const pVthresh=-40, pVscale=20;
+                const pRinM=300;
+
+                const Vr = CELL_NAMES.map(n => n.startsWith('HS') ? pVrHS : n.startsWith('VS') ? pVrVS1 : pVLm);
+                const Rin= CELL_NAMES.map(n => n.startsWith('HS') ? pRinHS : n.startsWith('VS') ? pRinVS1 : pRinM);
+
+                // Capacitances
+                const Cd = p.cdend, Cs = p.csoma, Ca = p.caxon;
+
+                // State: V[c][0=dend, 1=soma, 2=axon]
+                const V = CELL_NAMES.map((n,c) => [Vr[c], Vr[c], Vr[c]]);
+
+                // HH gates for MN axon
+                function aM(v){ return Math.abs(v+40)<1e-4 ? 1.0 : 0.1*(v+40)/(1-Math.exp(-(v+40)/10)); }
+                function bM(v){ return 4*Math.exp(-(v+65)/18); }
+                function aH(v){ return 0.07*Math.exp(-(v+65)/20); }
+                function bH(v){ return 1/(1+Math.exp(-(v+35)/10)); }
+                function aN(v){ return Math.abs(v+55)<1e-4 ? 0.1 : 0.01*(v+55)/(1-Math.exp(-(v+55)/10)); }
+                function bN(v){ return 0.125*Math.exp(-(v+65)/80); }
+
+                const mHH=[], hHH=[], nHH=[];
+                CELL_NAMES.forEach((n,c) => {
+                    const v=V[c][2];
+                    mHH.push(aM(v)/(aM(v)+bM(v))); hHH.push(aH(v)/(aH(v)+bH(v))); nHH.push(aN(v)/(aN(v)+bN(v)));
+                });
+
+                // T-Ca / K gating for LPTC axon
+                const tMinf=v=>1/(1+Math.exp(-(v+50)/3));
+                const tHinf=v=>1/(1+Math.exp((v+68)/3.75));
+                const tHtau=v=>1/(Math.exp((v+160)/30)+Math.exp(-(v+84)/7.3))+22.7;
+                const kMinf=v=>1/(1+Math.exp(-(v+20)/8));
+                const mCa=[], hCa=[], nKl=[];
+                CELL_NAMES.forEach((n,c) => {
+                    const v=V[c][2];
+                    mCa.push(tMinf(v)); hCa.push(tHinf(v)); nKl.push(kMinf(v));
+                });
+
+                // GJ structures
+                // Axo-axonal within LPTC chains: {a, b, g, tau, Vfa, Vfb}
+                const gjAx = [];
+                function mkAxGJ(na, nb, g, tau) {
+                    return { a: CI[na], b: CI[nb], g, tau, Vfa: V[CI[na]][2], Vfb: V[CI[nb]][2] };
+                }
+                ['L','R'].forEach(s => {
+                    for (let k=1;k<=3;k++) gjAx.push(mkAxGJ('VS'+k+'_'+s,'VS'+(k+1)+'_'+s, pGlptc, pClptc));
+                    gjAx.push(mkAxGJ('HSN_'+s,'HSE_'+s, pGlptc, pClptc));
+                    gjAx.push(mkAxGJ('HSE_'+s,'HSS_'+s, pGlptc, pClptc));
+                });
+
+                // LPTC-axon <-> MN-dend GJ: {cl, cm, g, tau, VfL, VfM}
+                const gjLD = [];
+                function mkLDgj(nl, nm, g, tau) {
+                    return { cl: CI[nl], cm: CI[nm], g, tau, VfL: V[CI[nl]][2], VfM: V[CI[nm]][0] };
+                }
+                ['L','R'].forEach(s => {
+                    for (let k=1;k<=4;k++) gjLD.push(mkLDgj('VS'+k+'_'+s,'MOS_'+s, pGvsmos, pCmn));
+                    ['HSN','HSE','HSS'].forEach(h => {
+                        gjLD.push(mkLDgj(h+'_'+s,'MOS_'+s, pGhsmos, pCmn));
+                        gjLD.push(mkLDgj(h+'_'+s,'MOT_'+s, pGhsmot, pCmn));
+                    });
+                });
+
+                // Graded syn lookup: LPTC axon -> MN dend
+                const gradSyns = [];
+                for (let pi=0;pi<N;pi++) {
+                    if (!isLPTCa[pi]) continue;
+                    for (let qi=0;qi<N;qi++) {
+                        if (!isMNa[qi]) continue;
+                        const cnt=RAW_COUNTS[pi][qi]; if (!cnt) continue;
+                        gradSyns.push({ pre:pi, post:qi, cnt, Erev:SYN_ESYN[pi][qi] });
+                    }
+                }
+
+                // Alpha synapses: MN axon -> LPTC dend
+                const alphaSyns = [];
+                for (let pi=0;pi<N;pi++) {
+                    if (!isMNa[pi]) continue;
+                    for (let qi=0;qi<N;qi++) {
+                        if (!isLPTCa[qi]) continue;
+                        const cnt=RAW_COUNTS[pi][qi]; if (!cnt) continue;
+                        alphaSyns.push({ pre:pi, post:qi, g:0, dg:0, tau:pTauSyn, Erev:SYN_ESYN[pi][qi] });
+                    }
+                }
+
+                // Spike detection prev state
+                const prevVax = new Float64Array(N);
+
+                // Muscle tension (leaky integrator)
+                const muscTens = new Float64Array(N);
+
+                // Stim set
+                const stimSet = new Set(p.targets.map(n=>CI[n]).filter(i=>i!=null&&i>=0));
+
+                // Recording (downsample 4x)
+                const recStep = 4, NR = Math.ceil(NT/recStep);
+                const tRec = new Float32Array(NR);
+                const recAxon  = CELL_NAMES.map(()=>new Float32Array(NR));
+                const recDend  = CELL_NAMES.map(()=>new Float32Array(NR));
+                const recSoma  = CELL_NAMES.map(()=>new Float32Array(NR));
+                const mnIdxs   = CELL_NAMES.map((n,i)=>isMNa[i]?i:-1).filter(i=>i>=0);
+                const recMuscle= mnIdxs.map(()=>new Float32Array(NR));
+
+                let ri = 0;
+
+                for (let t=0; t<NT; t++) {
+                    const tms = t * dt;
+                    const stim = (tms >= p.tstart && tms < p.tend);
+
+                    // dV contributions (will be divided by C inside each section)
+                    const dVd = new Float64Array(N);  // dend
+                    const dVs = new Float64Array(N);  // soma
+                    const dVa = new Float64Array(N);  // axon
+
+                    // 1) Intrinsic currents
+                    for (let c=0; c<N; c++) {
+                        const vd=V[c][0], vs_=V[c][1], va=V[c][2];
+                        if (isLPTCa[c]) {
+                            const gl = 1/Rin[c], vr = Vr[c];
+                            dVd[c] += gl*(vr-vd)/Cd;
+                            dVs[c] += gl*(vr-vs_)/Cs;
+                            const ITca = pGVT_l*mCa[c]*mCa[c]*hCa[c]*(ECa-va);
+                            const IKl  = pGK_l *nKl[c]*nKl[c]*nKl[c]*nKl[c]*(EK-va);
+                            const ILl  = pGL_l *(vr-va);
+                            dVa[c] += (ITca+IKl+ILl)/Ca;
+                            // Update T-Ca/K gates
+                            mCa[c] += (tMinf(va)-mCa[c])/2 * dt;
+                            hCa[c] += (tHinf(va)-hCa[c])/tHtau(va) * dt;
+                            nKl[c] += (kMinf(va)-nKl[c])/20 * dt;
+                        } else if (isMNa[c]) {
+                            const gl = 1/Rin[c];
+                            dVd[c] += gl*(pVLm-vd)/Cd;
+                            dVs[c] += gl*(pVLm-vs_)/Cs;
+                            const INa  = pGNa *mHH[c]*mHH[c]*mHH[c]*hHH[c]*(ENa-va);
+                            const IKhh = pGK_m*nHH[c]*nHH[c]*nHH[c]*nHH[c]*(EK-va);
+                            const INaP = pGNaP*(1/(1+Math.exp(-(va+52)/5)))*(ENa-va);
+                            const ILm  = pGL_m*(pVLm-va);
+                            dVa[c] += (INa+IKhh+INaP+ILm)/Ca;
+                            // Update HH gates
+                            mHH[c] += (aM(va)*(1-mHH[c])-bM(va)*mHH[c])*dt;
+                            hHH[c] += (aH(va)*(1-hHH[c])-bH(va)*hHH[c])*dt;
+                            nHH[c] += (aN(va)*(1-nHH[c])-bN(va)*nHH[c])*dt;
+                        }
+                    }
+
+                    // 2) Axial coupling dend<->soma<->axon
+                    for (let c=0; c<N; c++) {
+                        const gax = isLPTCa[c] ? p.gaxL : p.gaxM;
+                        const ids = gax*(V[c][1]-V[c][0]);
+                        dVd[c] += ids/Cd; dVs[c] -= ids/Cs;
+                        const isa = gax*(V[c][2]-V[c][1]);
+                        dVs[c] += isa/Cs; dVa[c] -= isa/Ca;
+                    }
+
+                    // 3) Axo-axonal GJs (LPTC chains)
+                    for (const gj of gjAx) {
+                        const tauk = gj.tau/dt+1;
+                        gj.Vfa += (V[gj.a][2]-gj.Vfa)/tauk;
+                        gj.Vfb += (V[gj.b][2]-gj.Vfb)/tauk;
+                        dVa[gj.a] += gj.g*(gj.Vfb-V[gj.a][2])/Ca;
+                        dVa[gj.b] += gj.g*(gj.Vfa-V[gj.b][2])/Ca;
+                    }
+
+                    // 4) LPTC-axon <-> MN-dend GJs
+                    for (const gj of gjLD) {
+                        const tauk = gj.tau/dt+1;
+                        gj.VfL += (V[gj.cl][2]-gj.VfL)/tauk;
+                        gj.VfM += (V[gj.cm][0]-gj.VfM)/tauk;
+                        dVa[gj.cl] += gj.g*(gj.VfM-V[gj.cl][2])/Ca;
+                        dVd[gj.cm] += gj.g*(gj.VfL-V[gj.cm][0])/Cd;
+                    }
+
+                    // 5) Graded chem syn: LPTC axon -> MN dend
+                    for (const s of gradSyns) {
+                        const Spre = 1/(1+Math.exp(-(V[s.pre][2]-pVthresh)/pVscale));
+                        dVd[s.post] += -pGgrad*s.cnt*Spre*(V[s.post][0]-s.Erev)/Cd;
+                    }
+
+                    // 6) Alpha syn: MN axon -> LPTC dend (update conductance)
+                    for (const s of alphaSyns) {
+                        s.g  += s.dg*dt;
+                        s.dg -= s.dg/s.tau*dt;
+                        s.g   = Math.max(0, s.g);
+                        dVd[s.post] += -s.g*pGspike*(V[s.post][0]-s.Erev)/Cd;
+                    }
+
+                    // 7) Spike detection on MN axon -> trigger alpha syn
+                    for (let c=0; c<N; c++) {
+                        if (!isMNa[c]) continue;
+                        if (prevVax[c] < 0 && V[c][2] >= 0) {
+                            for (const s of alphaSyns) { if (s.pre===c) s.dg += 1.0/s.tau; }
+                            muscTens[c] += 1.0;
+                        }
+                        prevVax[c] = V[c][2];
+                    }
+
+                    // 8) Muscle tension (leaky integrator)
+                    for (let c=0; c<N; c++) {
+                        if (isMNa[c]) muscTens[c] -= muscTens[c]*dt/p.tauMuscle;
+                    }
+
+                    // 9) Stim (into dendrite of stimulated cells)
+                    if (stim) { for (const ci of stimSet) dVd[ci] += p.amp/Cd; }
+
+                    // 10) Noise (into axon of each cell)
+                    for (let c=0; c<N; c++) { dVa[c] += p.noise*(Math.random()-0.5)*2/Ca; }
+
+                    // Euler step
+                    for (let c=0; c<N; c++) {
+                        V[c][0] += dVd[c]*dt;
+                        V[c][1] += dVs[c]*dt;
+                        V[c][2] += dVa[c]*dt;
+                    }
+
+                    // Record
+                    if (t%recStep===0 && ri<NR) {
+                        tRec[ri] = tms;
+                        for (let c=0; c<N; c++) { recDend[c][ri]=V[c][0]; recSoma[c][ri]=V[c][1]; recAxon[c][ri]=V[c][2]; }
+                        for (let mi=0; mi<mnIdxs.length; mi++) recMuscle[mi][ri] = muscTens[mnIdxs[mi]];
+                        ri++;
+                    }
+                }
+
+                return {
+                    t: Array.from(tRec.subarray(0,ri)),
+                    dend:   recDend.map(a=>Array.from(a.subarray(0,ri))),
+                    soma:   recSoma.map(a=>Array.from(a.subarray(0,ri))),
+                    axon:   recAxon.map(a=>Array.from(a.subarray(0,ri))),
+                    muscle: recMuscle.map(a=>Array.from(a.subarray(0,ri))),
+                    mnIdxs,
+                };
+            }
+
+            // ── Plotting ──
+            function plotMCResults(res, p) {
+                const t = res.t;
+
+                // LPTC soma traces
+                const lptcTraces = CELL_NAMES
+                    .map((n,i) => ({ n, i }))
+                    .filter(({n}) => isLPTC_(n))
+                    .map(({n,i}) => ({
+                        x: t, y: res.soma[i], name: n, type: 'scatter', mode: 'lines',
+                        line: { color: neuronColors[n]||'#aaa', width: 1.0 },
+                    }));
+                lptcTraces.push({ x:[p.tstart,p.tend,p.tend,p.tstart], y:[-80,-80,20,20],
+                    fill:'toself', fillcolor:'rgba(255,255,0,0.07)', line:{width:0},
+                    showlegend:false, hoverinfo:'skip', type:'scatter', mode:'lines' });
+                Plotly.react('mcPlotLPTC', lptcTraces, {
+                    title: { text:'LPTC Soma Vm (VS + HS)', font:{size:10,color:'#ccc'} },
+                    xaxis: { title:'ms', color:'#888', gridcolor:'#333' },
+                    yaxis: { title:'mV', color:'#888', gridcolor:'#333', range:[-80,20] },
+                    paper_bgcolor:'#1a1a1a', plot_bgcolor:'#1a1a1a',
+                    legend:{ font:{size:8,color:'#ccc'}, bgcolor:'rgba(0,0,0,0.5)' },
+                    margin:{l:40,r:10,t:24,b:28},
+                }, {responsive:true});
+
+                // MN compartments (per cell: dend=dotted, soma=dashed, axon=solid)
+                const mnTraces = [];
+                res.mnIdxs.forEach(ci => {
+                    const n = CELL_NAMES[ci], col = neuronColors[n]||'#ff7043';
+                    mnTraces.push({ x:t, y:res.dend[ci], name:n+' dend', type:'scatter', mode:'lines', line:{color:col, width:0.8, dash:'dot'} });
+                    mnTraces.push({ x:t, y:res.soma[ci], name:n+' soma', type:'scatter', mode:'lines', line:{color:col, width:0.8, dash:'dash'} });
+                    mnTraces.push({ x:t, y:res.axon[ci], name:n+' axon',  type:'scatter', mode:'lines', line:{color:col, width:1.5} });
+                });
+                mnTraces.push({ x:[p.tstart,p.tend,p.tend,p.tstart], y:[-80,-80,70,70],
+                    fill:'toself', fillcolor:'rgba(255,255,0,0.07)', line:{width:0},
+                    showlegend:false, hoverinfo:'skip', type:'scatter', mode:'lines' });
+                Plotly.react('mcPlotMN', mnTraces, {
+                    title: { text:'MN Compartments  (dotted=dend, dashed=soma, solid=axon)', font:{size:10,color:'#ccc'} },
+                    xaxis: { title:'ms', color:'#888', gridcolor:'#333' },
+                    yaxis: { title:'mV', color:'#888', gridcolor:'#333', range:[-80,70] },
+                    paper_bgcolor:'#1a1a1a', plot_bgcolor:'#1a1a1a',
+                    legend:{ font:{size:8,color:'#ccc'}, bgcolor:'rgba(0,0,0,0.5)' },
+                    margin:{l:40,r:10,t:24,b:28},
+                }, {responsive:true});
+
+                // Muscle tension
+                const muscTraces = res.mnIdxs.map((ci,mi) => {
+                    const n = CELL_NAMES[ci];
+                    const isMOS = n.startsWith('MOS');
+                    return { x:t, y:res.muscle[mi], name:n + (isMOS ? ' (horiz)' : ' (vert)'), type:'scatter', mode:'lines',
+                             line:{ color: neuronColors[n]||'#ff8a65', width:1.5, dash: isMOS ? 'solid' : 'dash' } };
+                });
+                Plotly.react('mcPlotMuscle', muscTraces, {
+                    title: { text:'Muscle Tension \u2014 MOS=horizontal axis (solid), MOT=vertical axis (dashed)', font:{size:10,color:'#ccc'} },
+                    xaxis: { title:'ms', color:'#888', gridcolor:'#333' },
+                    yaxis: { title:'AU', color:'#888', gridcolor:'#333', rangemode:'tozero' },
+                    paper_bgcolor:'#1a1a1a', plot_bgcolor:'#1a1a1a',
+                    legend:{ font:{size:8,color:'#ccc'}, bgcolor:'rgba(0,0,0,0.5)' },
+                    margin:{l:40,r:10,t:24,b:28},
+                }, {responsive:true});
+
+                // 2D eye direction: MOS = horizontal (x), MOT = vertical (y)
+                // Compute L-R difference for each MN type as net drive per axis
+                const mosLi = res.mnIdxs.findIndex(ci => CELL_NAMES[ci]==='MOS_L');
+                const mosRi = res.mnIdxs.findIndex(ci => CELL_NAMES[ci]==='MOS_R');
+                const motLi = res.mnIdxs.findIndex(ci => CELL_NAMES[ci]==='MOT_L');
+                const motRi = res.mnIdxs.findIndex(ci => CELL_NAMES[ci]==='MOT_R');
+                const nPts = t.length;
+                const eyeX = new Array(nPts), eyeY = new Array(nPts);
+                for (let i=0; i<nPts; i++) {
+                    eyeX[i] = (mosLi>=0 ? res.muscle[mosLi][i] : 0) - (mosRi>=0 ? res.muscle[mosRi][i] : 0);
+                    eyeY[i] = (motLi>=0 ? res.muscle[motLi][i] : 0) - (motRi>=0 ? res.muscle[motRi][i] : 0);
+                }
+                const eyeTraces = [
+                    { x:t, y:eyeX, name:'MOS axis (L\u2212R)', type:'scatter', mode:'lines',
+                      line:{ color:'#4CAF50', width:1.5 } },
+                    { x:t, y:eyeY, name:'MOT axis (L\u2212R)', type:'scatter', mode:'lines',
+                      line:{ color:'#7C5AB7', width:1.5, dash:'dash' } },
+                ];
+                // Also add a small polar-like trace: instantaneous direction
+                // Sample every 20 points for direction arrows
+                const step = Math.max(1, Math.floor(nPts/40));
+                const arrowX = [], arrowY = [], arrowText = [];
+                for (let i=0; i<nPts; i+=step) {
+                    const mag = Math.sqrt(eyeX[i]*eyeX[i]+eyeY[i]*eyeY[i]);
+                    if (mag > 0.01) {
+                        const ang = Math.atan2(eyeY[i], eyeX[i]) * 180/Math.PI;
+                        arrowText.push('t='+t[i].toFixed(0)+'ms  \u03b8='+ang.toFixed(0)+'\u00b0  |F|='+mag.toFixed(2));
+                    }
+                }
+                Plotly.react('mcPlotEyeDir', eyeTraces, {
+                    title: { text:'Eye Movement Vector (MOS=horiz, MOT=vert) \u2014 L minus R', font:{size:10,color:'#ccc'} },
+                    xaxis: { title:'ms', color:'#888', gridcolor:'#333' },
+                    yaxis: { title:'L\u2212R (AU)', color:'#888', gridcolor:'#333', zeroline:true, zerolinecolor:'#555' },
+                    paper_bgcolor:'#1a1a1a', plot_bgcolor:'#1a1a1a',
+                    legend:{ font:{size:8,color:'#ccc'}, bgcolor:'rgba(0,0,0,0.5)' },
+                    margin:{l:40,r:10,t:24,b:28},
+                }, {responsive:true});
+            }
+
+            // ── Run button ──
+            document.getElementById('mcRun').addEventListener('click', function() {
+                this.disabled = true; this.textContent = '\u23f3 Running...';
+                setTimeout(() => {
+                    try {
+                        const params = readMCParams();
+                        const result = buildAndRunMC(params);
+                        plotMCResults(result, params);
+                    } catch(e) { console.error('MC model error:', e); alert('MC model error: ' + e.message); }
+                    this.disabled = false; this.textContent = '\u25b6 Run';
+                }, 20);
+            });
+
+            // Auto-run on first open
+            setTimeout(() => {
+                try {
+                    const params = readMCParams();
+                    const result = buildAndRunMC(params);
+                    plotMCResults(result, params);
+                } catch(e) { console.error('MC init error:', e); }
+            }, 80);
         }
 
         // ── Resizable panels ────────────────────────────────────────
@@ -2386,6 +4153,8 @@ def load_overlap_vertices(results_dir):
         else:
             pair_groups[ukey] = pd.concat([pair_groups[ukey], grp])
 
+    _auto_idx_counter = 0  # auto-assign overlap idx when EM metadata is absent
+
     for (na, nb), grp in pair_groups.items():
         mx = grp['mid_x'].values
         my = grp['mid_y'].values
@@ -2397,6 +4166,11 @@ def load_overlap_vertices(results_dir):
             # Single cluster (or no metadata) — same as before
             meta = meta_items[0] if meta_items else {}
             em_idx = meta.get('idx', -1)
+            # Auto-assign a positive idx when EM metadata is absent
+            # so that overlapList gets populated for face clicking
+            if em_idx < 0:
+                em_idx = _auto_idx_counter
+                _auto_idx_counter += 1
             z_lo = meta.get('z_lo', -20)
             z_hi = meta.get('z_hi', 20)
             valid_z = meta.get('valid_z', [])
@@ -2434,13 +4208,17 @@ def load_overlap_vertices(results_dir):
                 cmask = assignments == ci
                 if cmask.sum() == 0:
                     continue
+                cl_idx = meta.get('idx', -1)
+                if cl_idx < 0:
+                    cl_idx = _auto_idx_counter
+                    _auto_idx_counter += 1
                 for neuron, other in [(na, nb), (nb, na)]:
                     per_pair.setdefault(neuron, []).append({
                         'other': other,
                         'x': mx[cmask].tolist(),
                         'y': my[cmask].tolist(),
                         'z': mz[cmask].tolist(),
-                        'idx': meta.get('idx', -1),
+                        'idx': cl_idx,
                         'z_lo': meta.get('z_lo', -20),
                         'z_hi': meta.get('z_hi', 20),
                         'valid_z': meta.get('valid_z', []),
@@ -2455,8 +4233,11 @@ def load_overlap_vertices(results_dir):
                     })
 
     total = sum(len(v['x']) for v in per_neuron.values())
+    n_auto = _auto_idx_counter if not em_meta_list else 0
     print(f"[overlaps] {len(df)} overlap midpoints across "
           f"{len(per_neuron)} neurons ({total} trace points)")
+    if n_auto:
+        print(f"[overlaps] Auto-assigned {n_auto} overlap indices (no EM metadata)")
     return per_neuron, per_pair
 
 
@@ -2477,7 +4258,17 @@ def load_overlap_faces(results_dir):
         return {}, {}
 
     print("[overlap faces] Loading contact_faces.csv ...")
-    df = pd.read_csv(csv_file)
+    try:
+        df = pd.read_csv(csv_file)
+    except Exception as e:
+        print(f"[overlap faces] Fast CSV read failed ({e}); retrying with python engine...")
+        df = pd.read_csv(csv_file, engine='python')
+
+    # Read decimation setting from neurons.json (default: 80nm = slight)
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
+    with open(cfg_path, 'r') as f:
+        _fcfg = json.load(f)
+    decimate_nm = _fcfg.get('face_decimation_nm', 80)  # 0 = no decimation
 
     # Detect degenerate faces (all 3 vertices identical = recycling bug)
     degen = (
@@ -2499,18 +4290,34 @@ def load_overlap_faces(results_dir):
         return {}, {}
 
     def _build_mesh3d_arrays(sub_df):
-        """Convert a sub-DataFrame of faces into Mesh3d x/y/z/i/j/k arrays."""
+        """Convert a sub-DataFrame of faces into Mesh3d x/y/z/i/j/k arrays.
+
+        If decimate_nm > 0, rounds vertex coordinates to the nearest step
+        before deduplication, merging nearby vertices to reduce triangle count.
+        """
         xs, ys, zs = [], [], []
         ii, jj, kk = [], [], []
         vert_map = {}  # (x,y,z) -> index for dedup
         labels = []
+        step = decimate_nm if decimate_nm > 0 else 0
 
         for _, row in sub_df.iterrows():
-            verts = [
+            raw_verts = [
                 (row['vertex1_x'], row['vertex1_y'], row['vertex1_z']),
                 (row['vertex2_x'], row['vertex2_y'], row['vertex2_z']),
                 (row['vertex3_x'], row['vertex3_y'], row['vertex3_z']),
             ]
+            # Apply decimation: round to nearest step
+            if step:
+                verts = [
+                    (round(v[0] / step) * step,
+                     round(v[1] / step) * step,
+                     round(v[2] / step) * step)
+                    for v in raw_verts
+                ]
+            else:
+                verts = raw_verts
+
             idxs = []
             for v in verts:
                 if v not in vert_map:
@@ -2519,6 +4326,9 @@ def load_overlap_faces(results_dir):
                     ys.append(v[1])
                     zs.append(v[2])
                 idxs.append(vert_map[v])
+            # Skip degenerate triangles (2+ vertices merged to same point)
+            if idxs[0] == idxs[1] or idxs[1] == idxs[2] or idxs[0] == idxs[2]:
+                continue
             ii.append(idxs[0])
             jj.append(idxs[1])
             kk.append(idxs[2])
@@ -2557,9 +4367,19 @@ def load_overlap_faces(results_dir):
 
     total_faces = sum(len(v['i']) for v in per_neuron_faces.values())
     total_verts = sum(len(v['x']) for v in per_neuron_faces.values())
-    print(f"[overlap faces] {len(df)} valid faces across "
+    # Each face appears in two per-neuron traces (for neuron_a and neuron_b),
+    # so the "original" count for comparison is 2 * len(df) (without decimation,
+    # each trace would have 3 verts per face = len(df)*3 verts per neuron).
+    orig_tris_in_traces = len(df) * 2  # one copy per involved neuron
+    reduction = 100 * (1 - total_faces / orig_tris_in_traces) if orig_tris_in_traces > 0 else 0
+    print(f"[overlap faces] {len(df)} CSV faces across "
           f"{len(per_neuron_faces)} neurons "
           f"({total_verts} vertices, {total_faces} triangles in traces)")
+    if decimate_nm > 0:
+        print(f"[overlap faces] Decimation at {decimate_nm}nm: "
+              f"{orig_tris_in_traces} -> {total_faces} trace triangles "
+              f"({reduction:.1f}% reduction, "
+              f"{total_verts} deduplicated vertices)")
     return per_neuron_faces, per_pair_faces
 
 
@@ -2604,7 +4424,22 @@ def load_overlap_table(results_dir):
 
 
 def load_mesh_skeleton(neuron_name, mesh_dir, max_points=15000):
-    """Load mesh and return subsampled point cloud."""
+    """Load a neuron surface mesh and return a subsampled point cloud.
+
+    The mesh file is looked up by numeric neuron ID (from ``NEURON_IDS``), so
+    the file must be named ``<neuron_id>.obj`` inside *mesh_dir*.
+
+    Args:
+        neuron_name:  Canonical neuron name (e.g. ``'VS1_L'``).
+        mesh_dir:     Directory containing ``.obj`` files.
+        max_points:   Maximum vertices to keep.  If the mesh has more,
+                      every ``N//max_points``-th vertex is kept so the Plotly
+                      Scatter3d trace stays responsive (default 15 000).
+
+    Returns:
+        ``(x, y, z)`` numpy float32 arrays, or ``(None, None, None)`` if the
+        neuron is not in ``NEURON_IDS`` or the file does not exist.
+    """
     neuron_id = {v: k for k, v in NEURON_IDS.items()}.get(neuron_name)
     if neuron_id is None:
         return None, None, None
@@ -2629,7 +4464,30 @@ def load_mesh_skeleton(neuron_name, mesh_dir, max_points=15000):
 # ── Build Plotly figure ───────────────────────────────────────────────
 
 def build_figure(mesh_dir):
-    """Build 3D figure with mesh, contact, synapse and overlap traces."""
+    """Build the Plotly 3D figure, loading all data sources.
+
+    Creates one group of traces per neuron, in this order:
+
+    1. ``<name>_mesh``              — Scatter3d point cloud (subsampled mesh)
+    2. ``<name>_contacts``          — Scatter3d contact patch centroids (red)
+    3. ``<name>_contacts_hl``       — empty highlight Scatter3d (JS populates on click)
+    4. ``<name>_synapses``          — Scatter3d synapses (yellow=excitatory, blue=inhibitory)
+    5. ``<name>_synapses_hl``       — empty highlight Scatter3d
+    6. ``<name>_alloverlaps``       — Scatter3d all overlap midpoints
+    7. ``<name>_curoverlaps``       — Scatter3d current-pair overlap midpoints
+    8. ``<name>_alloverlapfaces``   — Mesh3d aggregate overlap triangles
+    9. ``<name>_curroverlapfaces``  — Mesh3d current-pair triangles
+
+    Plus three global traces at the end:
+    * ``_pos_indicator``  — diamond at the currently selected EM location
+    * ``_gap_junctions``  — cyan spheres at annotated GJ sites
+
+    Returns:
+        ``(fig, contacts, synapses, trace_info, overlap_pairs, overlap_pair_faces)``
+        where ``trace_info`` maps ``'<name>_<kind>'`` keys to integer Plotly trace
+        indices, and the overlap dicts are passed straight through to
+        ``generate_html()``.
+    """
     contacts = load_contacts(RESULTS_DIR)
     synapses = load_synapses(RESULTS_DIR)
     overlap_verts, overlap_pairs = load_overlap_vertices(RESULTS_DIR)
@@ -2710,6 +4568,17 @@ def build_figure(mesh_dir):
         if not neuron_synapses.empty:
             M = len(neuron_synapses)
             synapse_indices = neuron_synapses['index'].values
+            # Per-point colors: blue for inhibitory (GABA), yellow for excitatory
+            syn_colors = [
+                '#4488ff' if (row['source'], row['target']) in INH_PAIRS
+                else 'yellow'
+                for _, row in neuron_synapses.iterrows()
+            ]
+            syn_labels = [
+                'Inhibitory (GABA)' if (row['source'], row['target']) in INH_PAIRS
+                else 'Excitatory (ACh/Glut)'
+                for _, row in neuron_synapses.iterrows()
+            ]
             trace_info[f"{neuron_name}_synapses"] = len(traces)
             traces.append(go.Scatter3d(
                 x=neuron_synapses['x'],
@@ -2718,7 +4587,7 @@ def build_figure(mesh_dir):
                 mode='markers',
                 name=f'{neuron_name}_synapses',
                 visible=False,
-                marker=dict(size=4, color='yellow', opacity=0.8),
+                marker=dict(size=4, color=syn_colors, opacity=0.8),
                 customdata=np.column_stack([
                     neuron_synapses['x'],
                     neuron_synapses['y'],
@@ -2726,9 +4595,11 @@ def build_figure(mesh_dir):
                     np.full(M, 'synapse'),
                     neuron_synapses['source'],
                     neuron_synapses['target'],
-                    synapse_indices]),
+                    synapse_indices,
+                    syn_labels]),
                 hovertemplate=(
                     'Synapse<br>%{customdata[4]} \u2192 %{customdata[5]}'
+                    '<br>%{customdata[7]}'
                     '<extra></extra>'),
                 legendgroup=neuron_name
             ))
@@ -2940,7 +4811,27 @@ def index_em_snapshots(em_snap_dir, contacts, synapses, results_dir):
 
 def generate_html(fig, contacts, synapses, trace_info,
                    overlap_pairs, overlap_pair_faces, em_snap_dir):
-    """Generate HTML with all data embedded."""
+    """Serialise all data into the HTML template and return the full HTML string.
+
+    Template placeholders substituted (all in ``HTML_TEMPLATE``):
+
+    * ``{SNAPSHOT_JSON}``          — ``{kind: {idx: 'em_snaps/...png'}}`` paths
+    * ``{CLUSTER_MAP_JSON}``       — ``{patch_idx: cluster_id}`` mapping
+    * ``{NEURON_NAMES_JSON}``      — ordered list of neuron names
+    * ``{TRACE_INFO_JSON}``        — ``{name_kind: trace_index}`` lookup
+    * ``{CONTACT_LIST_JSON}``      — list of contact patch records
+    * ``{SYNAPSE_LIST_JSON}``      — list of synapse records with isInh flag
+    * ``{OVERLAP_LIST_JSON}``      — list of overlap records with valid_z, area etc.
+    * ``{OVERLAP_TABLE_JSON}``     — summary rows used by the heatmap matrix
+    * ``{OVERLAP_PAIRS_JSON}``     — per-neuron list of overlap pairs with coords
+    * ``{OVERLAP_PAIR_FACES_JSON}``— per-neuron Mesh3d face data per pair
+    * ``{NEURON_COLORS_JSON}``     — ``{name: '#rrggbb'}`` color map
+    * ``{CHECKBOXES_HTML}``        — sidebar neuron control checkboxes
+    * ``{PLOT_DIV}``               — Plotly figure HTML + inline JSON
+
+    Returns:
+        Complete self-contained HTML string (~4 MB typical).
+    """
     snapshot_mapping = index_em_snapshots(
         em_snap_dir, contacts, synapses, RESULTS_DIR)
     overlap_table = load_overlap_table(RESULTS_DIR)
@@ -2970,9 +4861,9 @@ def generate_html(fig, contacts, synapses, trace_info,
             f'<label><input type="checkbox" id="curoverlaps_{neuron}">'
             f' Curr overlaps</label>'
             f'<label><input type="checkbox" id="alloverlapfaces_{neuron}">'
-            f' All overlap faces</label>'
+            f' All putative GJs</label>'
             f'<label><input type="checkbox" id="curroverlapfaces_{neuron}">'
-            f' Curr overlap faces</label>'
+            f' Curr putative GJs</label>'
             f'<label><input type="checkbox" id="allsynapses_{neuron}">'
             f' All synapses</label>'
             f'<label><input type="checkbox" id="cursynapses_{neuron}">'
@@ -2986,7 +4877,22 @@ def generate_html(fig, contacts, synapses, trace_info,
         '<div class="neuron-controls">'
         '<label><input type="checkbox" id="toggleAxes" checked>'
         ' Axis labels</label>'
-        '</div></div>'
+        '</div>'
+        '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;">'
+        '<button id="btnAllMesh" style="font-size:9px;padding:2px 6px;background:#444;'
+        'color:#ccc;border:1px solid #666;border-radius:3px;cursor:pointer;"'
+        ' title="Toggle all neuron meshes">All Neurons</button>'
+        '<button id="btnAllOverlaps" style="font-size:9px;padding:2px 6px;background:#444;'
+        'color:#ccc;border:1px solid #666;border-radius:3px;cursor:pointer;"'
+        ' title="Toggle all overlap vertices">All Overlaps</button>'
+        '<button id="btnAllOvFaces" style="font-size:9px;padding:2px 6px;background:#444;'
+        'color:#ccc;border:1px solid #666;border-radius:3px;cursor:pointer;"'
+        ' title="Toggle all putative gap junctions">All Put. GJs</button>'
+        '<button id="btnAllSynapses" style="font-size:9px;padding:2px 6px;background:#444;'
+        'color:#ccc;border:1px solid #666;border-radius:3px;cursor:pointer;"'
+        ' title="Toggle all synapses">All Synapses</button>'
+        '</div>'
+        '</div>'
     )
 
     checkboxes_html = global_controls + '\n'.join(neuron_checkboxes)
@@ -2995,8 +4901,11 @@ def generate_html(fig, contacts, synapses, trace_info,
     contact_list = contacts[[
         'idx', 'x', 'y', 'z', 'source', 'target', 'patch_area'
     ]].to_dict('records')
+    # Inhibitory pairs: add isInh field to synapse list entries
     synapse_list = synapses[['index', 'x', 'y', 'z', 'source', 'target']] \
         .rename(columns={'index': 'idx'}).to_dict('records')
+    for s in synapse_list:
+        s['isInh'] = 1 if (s['source'], s['target']) in INH_PAIRS else 0
 
     # Build overlap_pairs JSON for JS curr-overlap filtering
     # {neuron: [{other, idx, z_lo, z_hi, source, target, x[], y[], z[]}, ...]}
@@ -3135,6 +5044,7 @@ def generate_html(fig, contacts, synapses, trace_info,
         ]
     html = html.replace('{OVERLAP_PAIR_FACES_JSON}',
                          json.dumps(overlap_pair_faces_json))
+    html = html.replace('{NEURON_COLORS_JSON}', json.dumps(NEURON_COLORS))
 
     return html
 
@@ -3142,6 +5052,16 @@ def generate_html(fig, contacts, synapses, trace_info,
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main():
+    """Entry point: build and write the interactive HTML viewer.
+
+    Pipeline:
+        1. Build Plotly figure (loads all CSVs and mesh OBJs).
+        2. Generate HTML (serialise data, substitute template placeholders).
+        3. Write ``skeleton_em_viewer.html`` into ``RESULTS_DIR``.
+
+    The output file is completely self-contained — it requires only that the
+    browser can resolve relative paths ``em_snaps/*.png`` from the same folder.
+    """
     print("=" * 70)
     print("EM Viewer - Generating Interactive Viewer")
     print("=" * 70)
