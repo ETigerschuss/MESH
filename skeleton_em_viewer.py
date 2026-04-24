@@ -375,6 +375,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     <span id="zValue" class="control-value" style="min-width: 80px;">0</span>
                     <button id="btnNextZ">&gt;</button>
                 </div>
+                <div class="control-row" style="gap:8px;flex-wrap:wrap;">
+                    <span class="control-label">EM Opacity:</span>
+                    <input type="range" id="emOpacitySlider" min="10" max="100" value="100" step="1" style="width:120px;">
+                    <span id="emOpacityValue" class="control-value" style="min-width:45px;">100%</span>
+                    <button id="btnDownloadEM" title="Download current EM image with coordinates and touching cells">&#128247; Download EM</button>
+                </div>
                 <div class="control-row" style="justify-content: center; gap: 12px; flex-wrap: wrap;">
                     <span id="zNote" style="color: #888; font-size: 10px;">&#177;800nm depth range</span>
                     <button id="btnDeleteSlice" title="Remove this single slice (contact or overlap Z-slice)">&#128465; Delete Slice</button>
@@ -486,6 +492,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const zSlider       = document.getElementById('zSlider');
         const zValue        = document.getElementById('zValue');
         const zNote         = document.getElementById('zNote');
+        const emOpacitySlider = document.getElementById('emOpacitySlider');
+        const emOpacityValue  = document.getElementById('emOpacityValue');
+        const btnDownloadEM   = document.getElementById('btnDownloadEM');
         const btnDeleteSlice = document.getElementById('btnDeleteSlice');
         const btnDeleteAll  = document.getElementById('btnDeleteAll');
         const btnExport     = document.getElementById('btnExport');
@@ -1238,6 +1247,68 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 deletedBanner.textContent = isDel ? '\u2717 DELETED' : '';
             }
         }
+
+        // Debounced EM opacity update to avoid excessive re-renders
+        let emOpacityDebounceTimer = null;
+        function updateEMOpacity() {
+            if (emOpacityDebounceTimer !== null) clearTimeout(emOpacityDebounceTimer);
+            emOpacityDebounceTimer = setTimeout(() => {
+                const pct = Math.max(10, Math.min(100, parseInt(emOpacitySlider.value || '100', 10)));
+                emImage.style.opacity = String(pct / 100);
+                emOpacityValue.textContent = pct + '%';
+                emOpacityDebounceTimer = null;
+            }, 50);  // 50ms debounce
+        }
+
+        function downloadCurrentEMSnapshot() {
+            if (!currentKind || currentIdx === null || !emImage.src) {
+                alert('Select an item first to download its EM image.');
+                return;
+            }
+            const img = emImage;
+            const width = img.naturalWidth || img.width || 1024;
+            const height = img.naturalHeight || img.height || 768;
+            const absZ = Math.round(curItemZnm + currentZ * 40);
+            const touching = (currentSource && currentTarget) ? (currentSource + ' <-> ' + currentTarget) : 'n/a';
+            const line1 = currentKind.toUpperCase() + ' #' + currentIdx + '  z=' + currentZ + ' (' + absZ + ' nm)';
+            const line2 = 'coords: (' + Math.round(curItemX) + ', ' + Math.round(curItemY) + ', ' + absZ + ')';
+            const line3 = 'touching cells: ' + touching;
+            const fileName = 'em_' + currentKind + '_' + currentIdx + '_z' + (currentZ >= 0 ? '+' : '-')
+                + String(Math.abs(currentZ)).padStart(3, '0') + '.png';
+
+            const dl = document.createElement('a');
+            dl.download = fileName;
+            try {
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) throw new Error('No 2D context');
+
+                ctx.drawImage(img, 0, 0, width, height);
+                const boxH = 62;
+                ctx.fillStyle = 'rgba(0,0,0,0.60)';
+                ctx.fillRect(0, height - boxH, width, boxH);
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '16px sans-serif';
+                ctx.fillText(line1, 12, height - 40);
+                ctx.font = '14px sans-serif';
+                ctx.fillText(line2, 12, height - 22);
+                ctx.fillText(line3, 12, height - 6);
+
+                dl.href = canvas.toDataURL('image/png');
+            } catch (e) {
+                // Fallback for security-restricted canvases (e.g., strict file:// contexts)
+                dl.href = img.src;
+            }
+            document.body.appendChild(dl);
+            dl.click();
+            dl.remove();
+        }
+
+        emOpacitySlider.addEventListener('input', updateEMOpacity);
+        btnDownloadEM.addEventListener('click', downloadCurrentEMSnapshot);
+        updateEMOpacity();
 
         // ── Z-stack navigation ──────────────────────────────────────
         zSlider.addEventListener('input', function() {
@@ -2316,10 +2387,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
 
             // ── Default parameters ──
-            let pGVT_l = 0.5, pGL_l = 0.05, pGK_l = 2.0;
-            let pRinVS1 = 150, pVrVS1 = -40, pRinHS = 150, pVrHS = -45;
-            let pGVT_m = 0.0, pGL_m = 0.3, pRinM = 300;
-            let pGNa = 120, pGK_m = 36, pVLm = -65, pGNaP = 0.5, pIbias_m = 0;
+            let pVS_GVT = 0.5, pVS_GL = 0.05, pVS_GK = 2.0;
+            let pHS_GVT = 0.5, pHS_GL = 0.05, pHS_GK = 2.0;
+            let pVS_Rin1 = 150, pVS_RinStep = -10, pVS_Vr1 = -40, pVS_VrStep = -5;
+            let pHS_Rin = 150, pHS_Vr = -45;
+
+            let pMOS_GVT = 0.0, pMOS_GL = 0.3, pMOS_Rin = 300;
+            let pMOS_GNa = 120, pMOS_GK = 36, pMOS_VL = -65, pMOS_GNaP = 0.5, pMOS_Ibias = 0;
+            let pMOT_GVT = 0.0, pMOT_GL = 0.3, pMOT_Rin = 300;
+            let pMOT_GNa = 120, pMOT_GK = 36, pMOT_VL = -65, pMOT_GNaP = 0.5, pMOT_Ibias = 0;
+            let pupilBaselineStart = 0, pupilBaselineWindow = 90, pupilDisableJitter = false, pupilUseRawRate = false;
+
             let pGlptc = 0.05, pClptc = 0.05;
             let pGvsmos = 0.1, pGhsmos = 0.1, pGhsmot = 0.1, pCmn = 0.8;
             let pGgradExc = 0.005, pGgradInh = 0.004;
@@ -2330,18 +2408,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const disabledNodeSet = new Set(circuitDisabledNodes);
                 // ── Instantiate cells ──
                 const cells = [];
-                const VS_Vr  = [pVrVS1, pVrVS1-5, pVrVS1-10, pVrVS1-15];
-                const VS_Rin = [pRinVS1, pRinVS1-10, pRinVS1-20, pRinVS1-30];
+                const VS_Vr  = [pVS_Vr1, pVS_Vr1 + pVS_VrStep, pVS_Vr1 + 2 * pVS_VrStep, pVS_Vr1 + 3 * pVS_VrStep];
+                const VS_Rin = [pVS_Rin1, pVS_Rin1 + pVS_RinStep, pVS_Rin1 + 2 * pVS_RinStep, pVS_Rin1 + 3 * pVS_RinStep];
                 CELL_NAMES.forEach(n => {
                     const enabled = !disabledNodeSet.has(n);
                     let cell;
                     if (n.startsWith('VS')) {
                         const k = parseInt(n[2]) - 1;
-                        cell = createLPTC(n, VS_Rin[k], VS_Vr[k], pGVT_l, pGL_l, pGK_l);
+                        cell = createLPTC(n, VS_Rin[k], VS_Vr[k], pVS_GVT, pVS_GL, pVS_GK);
                     } else if (n.startsWith('HS')) {
-                        cell = createLPTC(n, pRinHS, pVrHS, pGVT_l, pGL_l, pGK_l);
+                        cell = createLPTC(n, pHS_Rin, pHS_Vr, pHS_GVT, pHS_GL, pHS_GK);
+                    } else if (n.startsWith('MOS')) {
+                        cell = createMN(n, pMOS_Rin, pMOS_VL, pMOS_GVT, pMOS_GL, pMOS_GNa, pMOS_GK, pMOS_GNaP);
+                    } else if (n.startsWith('MOT')) {
+                        cell = createMN(n, pMOT_Rin, pMOT_VL, pMOT_GVT, pMOT_GL, pMOT_GNa, pMOT_GK, pMOT_GNaP);
                     } else {
-                        cell = createMN(n, pRinM, pVLm, pGVT_m, pGL_m, pGNa, pGK_m, pGNaP);
+                        // Other cells (BIPS/H2) use MOT defaults unless split out later.
+                        cell = createMN(n, pMOT_Rin, pMOT_VL, pMOT_GVT, pMOT_GL, pMOT_GNa, pMOT_GK, pMOT_GNaP);
                     }
                     cell.enabled = enabled;
                     cells.push(cell);
@@ -2438,8 +2521,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         });
                     }
                     // Tonic bias for MN cells (active throughout simulation)
-                    for (let n = 0; n < N_CELLS; n++)
-                        if (cells[n].enabled && cells[n].type !== 'LPTC') extI[n] += pIbias_m;
+                    for (let n = 0; n < N_CELLS; n++) {
+                        if (!cells[n].enabled || cells[n].type === 'LPTC') continue;
+                        const nm = CELL_NAMES[n];
+                        if (nm.startsWith('MOS')) extI[n] += pMOS_Ibias;
+                        else extI[n] += pMOT_Ibias;
+                    }
                     // Noise
                     for (let n = 0; n < N_CELLS; n++)
                         if (cells[n].enabled) extI[n] += noiseLevel * (Math.random()*2-1);
@@ -2548,57 +2635,111 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 + '<summary style="cursor:pointer;color:#ef9a9a;">Cell Parameters (MN &amp; LPTC)</summary>';
             html += '<div style="display:flex;gap:10px;flex-wrap:wrap;padding:4px 0;">';
 
-            // MN spiking cells (MOT/MOS) — orange labels
+            // MOS-specific spiking parameters
             html += '<fieldset style="border:1px solid #555;padding:4px 8px;margin:0;">'
-                + '<legend style="color:#ff7043;font-size:10px;">MN spiking (MOT/MOS)</legend>'
+                + '<legend style="color:#ef5350;font-size:10px;">MOS cells (left + right)</legend>'
                 + '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
-            html += '<label style="color:#ff7043;font-size:10px;" title="Leak reversal potential (mV). More negative \u2192 slower spontaneous rate.">V<sub>L</sub>: '
-                + '<input id="pVLm" type="number" value="-65" step="1" min="-90" max="-40" '
+            html += '<label style="color:#ef5350;font-size:10px;" title="Leak reversal potential (mV). More negative \u2192 slower spontaneous rate.">V<sub>L-MOS</sub>: '
+                + '<input id="pMOS_VLm" type="number" value="-65" step="1" min="-90" max="-40" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ff7043;font-size:10px;" title="Persistent Na\u207a conductance (nS). Primary driver of spontaneous firing. Reduce to lower rate and restore spike height in trains.">g<sub>NaP</sub>: '
-                + '<input id="pGNaP" type="number" value="0.5" step="0.05" min="0" max="3" '
+            html += '<label style="color:#ef5350;font-size:10px;" title="Persistent Na\u207a conductance (nS). Primary driver of spontaneous firing.">g<sub>NaP-MOS</sub>: '
+                + '<input id="pMOS_GNaP" type="number" value="0.5" step="0.05" min="0" max="3" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ff7043;font-size:10px;" title="Transient Na\u207a conductance (nS). Controls spike height.">g<sub>Na</sub>: '
-                + '<input id="pGNa" type="number" value="120" step="5" min="10" max="300" '
+            html += '<label style="color:#ef5350;font-size:10px;" title="Transient Na\u207a conductance (nS). Controls spike height.">g<sub>Na-MOS</sub>: '
+                + '<input id="pMOS_GNa" type="number" value="120" step="5" min="10" max="300" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ff7043;font-size:10px;" title="Delayed-rectifier K\u207a conductance (nS). Larger \u2192 deeper AHP \u2192 better Na recovery between spikes \u2192 consistent spike heights. Larger also prevents depolarisation block.">g<sub>K</sub>: '
-                + '<input id="pGKm" type="number" value="36" step="2" min="5" max="150" '
+            html += '<label style="color:#ef5350;font-size:10px;" title="Delayed-rectifier K\u207a conductance (nS).">g<sub>K-MOS</sub>: '
+                + '<input id="pMOS_GKm" type="number" value="36" step="2" min="5" max="150" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ff7043;font-size:10px;" title="Leak conductance (nS). Larger \u2192 more stable, less prone to depolarisation block at high drive.">g<sub>L</sub>: '
-                + '<input id="pGLm" type="number" value="0.3" step="0.05" min="0" max="5" '
+            html += '<label style="color:#ef5350;font-size:10px;" title="Leak conductance (nS).">g<sub>L-MOS</sub>: '
+                + '<input id="pMOS_GLm" type="number" value="0.3" step="0.05" min="0" max="5" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ff7043;font-size:10px;" title="Input resistance (M\u03a9).">R<sub>in</sub>: '
-                + '<input id="pRinM" type="number" value="300" step="10" min="50" max="1000" '
+            html += '<label style="color:#ef5350;font-size:10px;" title="Input resistance (M\u03a9).">R<sub>in-MOS</sub>: '
+                + '<input id="pMOS_RinM" type="number" value="300" step="10" min="50" max="1000" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ffcc80;font-size:10px;" title="Tonic bias current injected into ALL MN cells at all times (nA). Positive \u2192 sustained depolarisation (tonic component). Negative \u2192 hyperpolarising drive.">I<sub>bias-MN</sub>: '
-                + '<input id="pIbiasM" type="number" value="0" step="0.5" min="-20" max="20" '
+            html += '<label style="color:#ef5350;font-size:10px;" title="Tonic bias current for MOS cells (nA).">I<sub>bias-MOS</sub>: '
+                + '<input id="pMOS_IbiasM" type="number" value="0" step="0.5" min="-20" max="20" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ef5350;font-size:10px;" title="T-Ca conductance in MOS cells (nS).">g<sub>VT-MOS</sub>: '
+                + '<input id="pMOS_GVTm" type="number" value="0" step="0.05" min="0" max="2" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
             html += '</div></fieldset>';
 
-            // LPTC non-spiking (VS/HS) — purple labels
+            // MOT-specific spiking parameters
             html += '<fieldset style="border:1px solid #555;padding:4px 8px;margin:0;">'
-                + '<legend style="color:#ce93d8;font-size:10px;">LPTC non-spiking (VS/HS)</legend>'
+                + '<legend style="color:#ff7043;font-size:10px;">MOT cells (left + right)</legend>'
                 + '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
-            html += '<label style="color:#ce93d8;font-size:10px;" title="VS1 resting potential (mV). VS2/3/4 are \u22125/\u221210/\u221215 mV from this.">V<sub>r-VS1</sub>: '
-                + '<input id="pVrVS1" type="number" value="-40" step="1" min="-80" max="-10" '
+            html += '<label style="color:#ff7043;font-size:10px;" title="Leak reversal potential (mV).">V<sub>L-MOT</sub>: '
+                + '<input id="pMOT_VLm" type="number" value="-65" step="1" min="-90" max="-40" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ce93d8;font-size:10px;" title="HS resting potential (mV).">V<sub>r-HS</sub>: '
-                + '<input id="pVrHS" type="number" value="-45" step="1" min="-80" max="-10" '
+            html += '<label style="color:#ff7043;font-size:10px;" title="Persistent Na\u207a conductance (nS).">g<sub>NaP-MOT</sub>: '
+                + '<input id="pMOT_GNaP" type="number" value="0.5" step="0.05" min="0" max="3" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ce93d8;font-size:10px;" title="LPTC T-type Ca\u00b2\u207a conductance (nS).">g<sub>VT-LPTC</sub>: '
-                + '<input id="pGVTl" type="number" value="0.5" step="0.05" min="0" max="3" '
+            html += '<label style="color:#ff7043;font-size:10px;" title="Transient Na\u207a conductance (nS).">g<sub>Na-MOT</sub>: '
+                + '<input id="pMOT_GNa" type="number" value="120" step="5" min="10" max="300" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ce93d8;font-size:10px;" title="LPTC K\u207a conductance (nS).">g<sub>K-LPTC</sub>: '
-                + '<input id="pGKl" type="number" value="2.0" step="0.1" min="0" max="10" '
+            html += '<label style="color:#ff7043;font-size:10px;" title="Delayed-rectifier K\u207a conductance (nS).">g<sub>K-MOT</sub>: '
+                + '<input id="pMOT_GKm" type="number" value="36" step="2" min="5" max="150" '
                 + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ce93d8;font-size:10px;" title="LPTC leak conductance (nS).">g<sub>L-LPTC</sub>: '
-                + '<input id="pGLl" type="number" value="0.05" step="0.005" min="0" max="1" '
+            html += '<label style="color:#ff7043;font-size:10px;" title="Leak conductance (nS).">g<sub>L-MOT</sub>: '
+                + '<input id="pMOT_GLm" type="number" value="0.3" step="0.05" min="0" max="5" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ce93d8;font-size:10px;" title="HS input resistance (M\u03a9). VS1-4 step down by 10 each.">R<sub>in-HS</sub>: '
-                + '<input id="pRinHS" type="number" value="150" step="10" min="50" max="1000" '
+            html += '<label style="color:#ff7043;font-size:10px;" title="Input resistance (M\u03a9).">R<sub>in-MOT</sub>: '
+                + '<input id="pMOT_RinM" type="number" value="300" step="10" min="50" max="1000" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
-            html += '<label style="color:#ce93d8;font-size:10px;" title="VS1 input resistance (M\u03a9). VS2/3/4 step down by 10 each.">R<sub>in-VS1</sub>: '
-                + '<input id="pRinVS1" type="number" value="150" step="10" min="50" max="1000" '
+            html += '<label style="color:#ff7043;font-size:10px;" title="Tonic bias current for MOT cells (nA).">I<sub>bias-MOT</sub>: '
+                + '<input id="pMOT_IbiasM" type="number" value="0" step="0.5" min="-20" max="20" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ff7043;font-size:10px;" title="T-Ca conductance in MOT cells (nS).">g<sub>VT-MOT</sub>: '
+                + '<input id="pMOT_GVTm" type="number" value="0" step="0.05" min="0" max="2" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '</div></fieldset>';
+
+            // VS non-spiking parameters
+            html += '<fieldset style="border:1px solid #555;padding:4px 8px;margin:0;">'
+                + '<legend style="color:#ab47bc;font-size:10px;">VS cells (left + right)</legend>'
+                + '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+            html += '<label style="color:#ab47bc;font-size:10px;" title="VS1 resting potential (mV). VS2/3/4 are offset by the step parameter.">V<sub>r-VS1</sub>: '
+                + '<input id="pVS_Vr1" type="number" value="-40" step="1" min="-80" max="-10" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ab47bc;font-size:10px;" title="Per-index resting potential increment for VS2-4 (mV).">\u0394V<sub>r-step</sub>: '
+                + '<input id="pVS_VrStep" type="number" value="-5" step="1" min="-20" max="20" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ab47bc;font-size:10px;" title="VS1 input resistance (M\u03a9).">R<sub>in-VS1</sub>: '
+                + '<input id="pVS_Rin1" type="number" value="150" step="10" min="50" max="1000" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ab47bc;font-size:10px;" title="Per-index resistance increment for VS2-4 (M\u03a9).">\u0394R<sub>in-step</sub>: '
+                + '<input id="pVS_RinStep" type="number" value="-10" step="1" min="-100" max="100" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ab47bc;font-size:10px;" title="VS T-type Ca\u00b2\u207a conductance (nS).">g<sub>VT-VS</sub>: '
+                + '<input id="pVS_GVTl" type="number" value="0.5" step="0.05" min="0" max="3" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ab47bc;font-size:10px;" title="VS K\u207a conductance (nS).">g<sub>K-VS</sub>: '
+                + '<input id="pVS_GKl" type="number" value="2.0" step="0.1" min="0" max="10" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ab47bc;font-size:10px;" title="VS leak conductance (nS).">g<sub>L-VS</sub>: '
+                + '<input id="pVS_GLl" type="number" value="0.05" step="0.005" min="0" max="1" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '</div></fieldset>';
+
+            // HS non-spiking parameters
+            html += '<fieldset style="border:1px solid #555;padding:4px 8px;margin:0;">'
+                + '<legend style="color:#4fc3f7;font-size:10px;">HS cells (left + right)</legend>'
+                + '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+            html += '<label style="color:#4fc3f7;font-size:10px;" title="HS resting potential (mV).">V<sub>r-HS</sub>: '
+                + '<input id="pHS_Vr" type="number" value="-45" step="1" min="-80" max="-10" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#4fc3f7;font-size:10px;" title="HS input resistance (M\u03a9).">R<sub>in-HS</sub>: '
+                + '<input id="pHS_Rin" type="number" value="150" step="10" min="50" max="1000" '
+                + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#4fc3f7;font-size:10px;" title="HS T-type Ca\u00b2\u207a conductance (nS).">g<sub>VT-HS</sub>: '
+                + '<input id="pHS_GVTl" type="number" value="0.5" step="0.05" min="0" max="3" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#4fc3f7;font-size:10px;" title="HS K\u207a conductance (nS).">g<sub>K-HS</sub>: '
+                + '<input id="pHS_GKl" type="number" value="2.0" step="0.1" min="0" max="10" '
+                + 'style="width:48px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#4fc3f7;font-size:10px;" title="HS leak conductance (nS).">g<sub>L-HS</sub>: '
+                + '<input id="pHS_GLl" type="number" value="0.05" step="0.005" min="0" max="1" '
                 + 'style="width:50px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
             html += '</div></fieldset>';
 
@@ -2652,6 +2793,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 + '<input id="pVscale" type="number" value="20" step="1" min="1" max="60" '
                 + 'style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;" '
                 + 'title="mV range over which graded release goes from 0 to 1."></label>';
+            html += '</div></details>';
+
+            // Pseudopupil analysis controls
+            html += '<details style="color:#aaa;font-size:10px;"><summary style="cursor:pointer;color:#80deea;">Pseudopupil Analysis (baseline &amp; readout mode)</summary>';
+            html += '<div style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 0;align-items:center;">';
+            html += '<label style="color:#80deea;font-size:10px;" title="Time (ms) offset from stimulus start for baseline window.">';
+            html += 'Baseline start offset (ms): <input id="pupilBaselineStart" type="number" value="0" step="5" min="-200" max="200" style="width:55px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#80deea;font-size:10px;" title="Duration (ms) of baseline sampling window.">';
+            html += 'Baseline window (ms): <input id="pupilBaselineWindow" type="number" value="90" step="5" min="10" max="500" style="width:55px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#80deea;font-size:10px;"><input id="pupilDisableJitter" type="checkbox" style="width:12px;height:12px;" title="Disable rate-transient-driven jitter."> Disable transient jitter</label>';
+            html += '<label style="color:#80deea;font-size:10px;"><input id="pupilUseRawRate" type="checkbox" style="width:12px;height:12px;" title="Use raw firing rate instead of baseline-subtracted response."> Use raw rate (not Δ)</label>';
             html += '</div></details>';
 
             // Plot areas
@@ -2903,23 +3055,38 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 stimStart  = pf('circStimStart', 90);
                 stimEnd    = pf('circStimEnd',   590);
                 noiseLevel = pf('circNoise',     3);
-                // MN cell params
-                pVLm     = pf('pVLm',    -65);
-                pGNaP    = pf('pGNaP',   0.5);
-                pGNa     = pf('pGNa',    120);
-                pGK_m    = pf('pGKm',    36);
-                pGL_m    = pf('pGLm',    0.3);
-                pRinM    = pf('pRinM',   300);
-                pIbias_m = pf('pIbiasM', 0);
-                pGVT_m   = pf('pGVTm',   0.0);
-                // LPTC cell params
-                pVrVS1   = pf('pVrVS1',  -40);
-                pVrHS    = pf('pVrHS',   -45);
-                pGVT_l   = pf('pGVTl',   0.5);
-                pGK_l    = pf('pGKl',    2.0);
-                pGL_l    = pf('pGLl',    0.05);
-                pRinHS   = pf('pRinHS',  150);
-                pRinVS1  = pf('pRinVS1', 150);
+                // MOS parameters
+                pMOS_VL    = pf('pMOS_VLm', -65);
+                pMOS_GNaP  = pf('pMOS_GNaP', 0.5);
+                pMOS_GNa   = pf('pMOS_GNa', 120);
+                pMOS_GK    = pf('pMOS_GKm', 36);
+                pMOS_GL    = pf('pMOS_GLm', 0.3);
+                pMOS_Rin   = pf('pMOS_RinM', 300);
+                pMOS_Ibias = pf('pMOS_IbiasM', 0);
+                pMOS_GVT   = pf('pMOS_GVTm', 0.0);
+                // MOT parameters
+                pMOT_VL    = pf('pMOT_VLm', -65);
+                pMOT_GNaP  = pf('pMOT_GNaP', 0.5);
+                pMOT_GNa   = pf('pMOT_GNa', 120);
+                pMOT_GK    = pf('pMOT_GKm', 36);
+                pMOT_GL    = pf('pMOT_GLm', 0.3);
+                pMOT_Rin   = pf('pMOT_RinM', 300);
+                pMOT_Ibias = pf('pMOT_IbiasM', 0);
+                pMOT_GVT   = pf('pMOT_GVTm', 0.0);
+                // VS parameters
+                pVS_Vr1    = pf('pVS_Vr1', -40);
+                pVS_VrStep = pf('pVS_VrStep', -5);
+                pVS_Rin1   = pf('pVS_Rin1', 150);
+                pVS_RinStep= pf('pVS_RinStep', -10);
+                pVS_GVT    = pf('pVS_GVTl', 0.5);
+                pVS_GK     = pf('pVS_GKl', 2.0);
+                pVS_GL     = pf('pVS_GLl', 0.05);
+                // HS parameters
+                pHS_Vr     = pf('pHS_Vr', -45);
+                pHS_Rin    = pf('pHS_Rin', 150);
+                pHS_GVT    = pf('pHS_GVTl', 0.5);
+                pHS_GK     = pf('pHS_GKl', 2.0);
+                pHS_GL     = pf('pHS_GLl', 0.05);
                 // GJ params
                 pGlptc   = pf('pGlptc',   0.05);
                 pClptc   = pf('pClptc',   0.05);
@@ -2935,6 +3102,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 pTauSyn  = pf('pTauSyn',  5);
                 pVthresh = pf('pVthresh', -40);
                 pVscale  = pf('pVscale',   20);
+                // Pseudopupil analysis
+                pupilBaselineStart    = pf('pupilBaselineStart', 0);
+                pupilBaselineWindow   = pf('pupilBaselineWindow', 90);
+                pupilDisableJitter    = document.getElementById('pupilDisableJitter').checked;
+                pupilUseRawRate       = document.getElementById('pupilUseRawRate').checked;
             }
 
             document.getElementById('circResetNodes').addEventListener('click', function() {
@@ -3087,9 +3259,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     }
                     return lowpass1(hzRaw, dtMs, 180.0);
                 }
-                function meanPre(arr, t, t0) {
+                function meanPre(arr, t, t0, duration) {
+                    // Modified: if duration is provided, use sliding window [t0-duration, t0]
                     let s = 0, c = 0;
-                    for (let i = 0; i < arr.length; i++) if (t[i] < t0) { s += arr[i]; c++; }
+                    const t_min = duration ? (t0 - duration) : -Infinity;
+                    for (let i = 0; i < arr.length; i++) if (t[i] >= t_min && t[i] < t0) { s += arr[i]; c++; }
                     return c ? s / c : 0;
                 }
                 function satPull(d, scale) {
@@ -3126,47 +3300,53 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         motRelease: mirrorRightToLeft(rightCal.motRelease),
                         motPull: mirrorRightToLeft(rightCal.motPull),
                     };
-                    const bMos = meanPre(mosRate, tMs, stimStart);
-                    const bMot = meanPre(motRate, tMs, stimStart);
+                    // Use user-defined baseline window (start offset + duration)
+                    const baselineEndTime = stimStart + pupilBaselineStart;
+                    const bMos = meanPre(mosRate, tMs, baselineEndTime, pupilBaselineWindow);
+                    const bMot = meanPre(motRate, tMs, baselineEndTime, pupilBaselineWindow);
                     const DEAD = 5.0;  // Hz dead-zone: ignore sub-threshold fluctuations
                     const x = new Float32Array(mosRate.length);
                     const y = new Float32Array(mosRate.length);
                     const r = new Float32Array(mosRate.length);
                     const th = new Float32Array(mosRate.length);
                     for (let i = 0; i < mosRate.length; i++) {
-                        const rawDMos = mosRate[i] - bMos;
-                        const rawDMot = motRate[i] - bMot;
+                        // Option: use raw rate or baseline-subtracted
+                        const dMos = pupilUseRawRate ? mosRate[i] : (mosRate[i] - bMos);
+                        const dMot = pupilUseRawRate ? motRate[i] : (motRate[i] - bMot);
+                        const rawDMos = dMos, rawDMot = dMot;
                         // Dead-zone: treat small fluctuations as zero
-                        const dMos = Math.abs(rawDMos) < DEAD ? 0 : rawDMos - Math.sign(rawDMos) * DEAD;
-                        const dMot = Math.abs(rawDMot) < DEAD ? 0 : rawDMot - Math.sign(rawDMot) * DEAD;
+                        const dMosDZ = Math.abs(rawDMos) < DEAD ? 0 : rawDMos - Math.sign(rawDMos) * DEAD;
+                        const dMotDZ = Math.abs(rawDMot) < DEAD ? 0 : rawDMot - Math.sign(rawDMot) * DEAD;
 
                         const vec = { x: 0, y: 0 };
 
                         // Individual component pulls/releases
-                        addPolar(vec, satPull(Math.max(0, dMos), 40), cal.mosPull);
-                        addPolar(vec, satRelease(Math.max(0, -dMos), 26), cal.mosRelease);
-                        addPolar(vec, satPull(Math.max(0, dMot), 40), cal.motPull);
-                        addPolar(vec, satRelease(Math.max(0, -dMot), 26), cal.motRelease);
+                        addPolar(vec, satPull(Math.max(0, dMosDZ), 40), cal.mosPull);
+                        addPolar(vec, satRelease(Math.max(0, -dMosDZ), 26), cal.mosRelease);
+                        addPolar(vec, satPull(Math.max(0, dMotDZ), 40), cal.motPull);
+                        addPolar(vec, satRelease(Math.max(0, -dMotDZ), 26), cal.motRelease);
 
                         // Cooperative term when both rise/fall together
-                        const bothUp = Math.min(Math.max(0, dMos), Math.max(0, dMot));
-                        const bothDown = Math.min(Math.max(0, -dMos), Math.max(0, -dMot));
+                        const bothUp = Math.min(Math.max(0, dMosDZ), Math.max(0, dMotDZ));
+                        const bothDown = Math.min(Math.max(0, -dMosDZ), Math.max(0, -dMotDZ));
                         addPolar(vec, satPull(bothUp, 50), cal.bothPull);
                         addPolar(vec, satRelease(bothDown, 34), cal.bothRelease);
 
-                        // Spike-like jitter: converts rate transients into small scanpath wiggles.
-                        const dMosRate = (i > 0) ? Math.abs(mosRate[i] - mosRate[i - 1]) : 0;
-                        const dMotRate = (i > 0) ? Math.abs(motRate[i] - motRate[i - 1]) : 0;
-                        const transient = Math.min(1.0, (dMosRate + dMotRate) / 18.0);
-                        const drive = Math.min(1.0, (Math.abs(dMos) + Math.abs(dMot)) / 70.0);
-                        const jitterMag = 0.55 * transient * (0.3 + 0.7 * drive);
-                        if (jitterMag > 1e-4) {
-                            const seed = (sideTag === 'R') ? 0.91 : 0.37;
-                            const jitterTheta = (180 / Math.PI) * (
-                                2.1 * Math.sin(0.33 * i + seed) +
-                                1.3 * Math.sin(0.91 * i + 0.7 + seed)
-                            );
-                            addPolar(vec, jitterMag, (jitterTheta + 360) % 360);
+                        // Spike-like jitter: converts rate transients into small scanpath wiggles (can be disabled).
+                        if (!pupilDisableJitter) {
+                            const dMosRate = (i > 0) ? Math.abs(mosRate[i] - mosRate[i - 1]) : 0;
+                            const dMotRate = (i > 0) ? Math.abs(motRate[i] - motRate[i - 1]) : 0;
+                            const transient = Math.min(1.0, (dMosRate + dMotRate) / 18.0);
+                            const drive = Math.min(1.0, (Math.abs(dMosDZ) + Math.abs(dMotDZ)) / 70.0);
+                            const jitterMag = 0.55 * transient * (0.3 + 0.7 * drive);
+                            if (jitterMag > 1e-4) {
+                                const seed = (sideTag === 'R') ? 0.91 : 0.37;
+                                const jitterTheta = (180 / Math.PI) * (
+                                    2.1 * Math.sin(0.33 * i + seed) +
+                                    1.3 * Math.sin(0.91 * i + 0.7 + seed)
+                                );
+                                addPolar(vec, jitterMag, (jitterTheta + 360) % 360);
+                            }
                         }
 
                         let px = vec.x;
@@ -3242,30 +3422,57 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     polar: {
                         domain: { x: [0.0, 0.48], y: [0, 1] },
                         bgcolor: '#1a1a1a', radialaxis: { range: [0, 10], color: '#888', gridcolor: '#333' },
-                        angularaxis: { direction: 'counterclockwise', color: '#888', gridcolor: '#333' }
+                        angularaxis: {
+                            direction: 'counterclockwise',
+                            color: '#888',
+                            gridcolor: '#333',
+                            tickmode: 'array',
+                            tickvals: [0, 90, 180, 270],
+                            ticktext: ['front', 'up', 'back', 'down']
+                        }
                     },
                     polar2: {
                         domain: { x: [0.52, 1.0], y: [0, 1] },
                         bgcolor: '#1a1a1a', radialaxis: { range: [0, 10], color: '#888', gridcolor: '#333' },
-                        angularaxis: { direction: 'counterclockwise', color: '#888', gridcolor: '#333' }
+                        angularaxis: {
+                            direction: 'counterclockwise',
+                            color: '#888',
+                            gridcolor: '#333',
+                            tickmode: 'array',
+                            tickvals: [0, 90, 180, 270],
+                            ticktext: ['back', 'up', 'front', 'down']
+                        }
                     },
                     annotations: [
-                        { text: 'Right eye (0° = front→middle)', x: 0.24, y: 1.08, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#29b6f6', size: 10 } },
-                        { text: 'Left eye (180° = front→middle)', x: 0.76, y: 1.08, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#80cbc4', size: 10 } }
+                        { text: 'Right eye (front/back/up/down)', x: 0.24, y: 1.08, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#29b6f6', size: 10 } },
+                        { text: 'Left eye (front/back/up/down)', x: 0.76, y: 1.08, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#80cbc4', size: 10 } }
                     ],
                     legend: { font: { size: 8, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.4)' },
                     margin: { l: 20, r: 20, t: 40, b: 20 }
                 }, { responsive: true });
             }
 
-            // Auto-run on init (deferred to avoid blocking UI)
-            setTimeout(() => {
+            // ── Lazy circuit initialization: only build when user clicks Tier-1 tab ──
+            let circuitInitialized = false;
+            function initializeCircuit() {
+                if (circuitInitialized) return;
+                circuitInitialized = true;
                 try {
                     readParams();
                     const res = buildAndRun();
                     plotResults(res);
                 } catch(e) { console.error('Tier 1 circuit init error:', e); }
-            }, 80);
+            }
+            // Find the Tier-1 tab button and wire lazy load
+            const tier1TabBtn = document.querySelector('[data-tab="tier1"]');
+            if (tier1TabBtn) {
+                tier1TabBtn.addEventListener('click', function() {
+                    setTimeout(() => { initializeCircuit(); }, 50);
+                });
+            } else {
+                // Fallback: auto-init after delay if no tab button found
+                setTimeout(() => { initializeCircuit(); }, 80);
+            }
         }
 
         // ── Multi-Compartment (Tier 2) model ─────────────────────────
