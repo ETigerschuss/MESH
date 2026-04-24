@@ -5,186 +5,142 @@
       "id": 720575940618519710,
       "group": "MOT",
       "color_hex": "#5E3C99",
-      "color_rgb": [
-        94,
-        60,
-        153
-      ]
+      "color_rgb": [94, 60, 153]
     },
     "MOT_R": {
       "id": 720575940630139386,
       "group": "MOT",
       "color_hex": "#7C5AB7",
-      "color_rgb": [
-        124,
-        90,
-        183
-      ]
+      "color_rgb": [124, 90, 183]
     },
     "MOS_L": {
       "id": 720575940622361270,
       "group": "MOS",
       "color_hex": "#4D9221",
-      "color_rgb": [
-        77,
-        146,
-        33
-      ]
+      "color_rgb": [77, 146, 33]
     },
     "MOS_R": {
       "id": 720575940622168052,
       "group": "MOS",
       "color_hex": "#61A635",
-      "color_rgb": [
-        97,
-        166,
-        53
-      ]
+      "color_rgb": [97, 166, 53]
     },
     "VS1_L": {
       "id": 720575940626477498,
       "group": "VS",
       "color_hex": "#D14900",
-      "color_rgb": [
-        209,
-        73,
-        0
-      ]
+      "color_rgb": [209, 73, 0]
     },
     "VS1_R": {
       "id": 720575940619878961,
       "group": "VS",
       "color_hex": "#E5671E",
-      "color_rgb": [
-        229,
-        103,
-        30
-      ]
+      "color_rgb": [229, 103, 30]
     },
     "VS2_L": {
       "id": 720575940640722851,
       "group": "VS",
       "color_hex": "#BD3500",
-      "color_rgb": [
-        189,
-        53,
-        0
-      ]
+      "color_rgb": [189, 53, 0]
     },
     "VS2_R": {
       "id": 720575940613126835,
       "group": "VS",
       "color_hex": "#DB530A",
-      "color_rgb": [
-        219,
-        83,
-        10
-      ]
+      "color_rgb": [219, 83, 10]
     },
     "VS3_L": {
       "id": 720575940622831740,
       "group": "VS",
       "color_hex": "#C73F00",
-      "color_rgb": [
-        199,
-        63,
-        0
-      ]
+      "color_rgb": [199, 63, 0]
     },
     "VS3_R": {
       "id": 720575940641812699,
       "group": "VS",
       "color_hex": "#E05D14",
-      "color_rgb": [
-        224,
-        93,
-        20
-      ]
+      "color_rgb": [224, 93, 20]
     },
     "VS4_L": {
       "id": 720575940624273919,
       "group": "VS",
       "color_hex": "#B32B00",
-      "color_rgb": [
-        179,
-        43,
-        0
-      ]
+      "color_rgb": [179, 43, 0]
     },
     "VS4_R": {
       "id": 720575940659799937,
       "group": "VS",
       "color_hex": "#EA7128",
-      "color_rgb": [
-        234,
-        113,
-        40
-      ]
+      "color_rgb": [234, 113, 40]
     },
     "HSN_L": {
       "id": 720575940628031249,
       "group": "HS",
       "color_hex": "#C51B7D",
-      "color_rgb": [
-        197,
-        27,
-        125
-      ]
+      "color_rgb": [197, 27, 125]
     },
     "HSN_R": {
       "id": 720575940615933919,
       "group": "HS",
       "color_hex": "#D9399B",
-      "color_rgb": [
-        217,
-        57,
-        155
-      ]
+      "color_rgb": [217, 57, 155]
     },
     "HSE_L": {
       "id": 720575940629153020,
       "group": "HS",
       "color_hex": "#B10769",
-      "color_rgb": [
-        177,
-        7,
-        105
-      ]
+      "color_rgb": [177, 7, 105]
     },
     "HSE_R": {
       "id": 720575940629148007,
       "group": "HS",
       "color_hex": "#CF2587",
-      "color_rgb": [
-        207,
-        37,
-        135
-      ]
+      "color_rgb": [207, 37, 135]
     },
     "HSS_L": {
       "id": 720575940622312965,
       "group": "HS",
       "color_hex": "#BB1173",
-      "color_rgb": [
-        187,
-        17,
-        115
-      ]
+      "color_rgb": [187, 17, 115]
     },
     "HSS_R": {
       "id": 720575940628743496,
       "group": "HS",
       "color_hex": "#D92F91",
-      "color_rgb": [
-        217,
-        47,
-        145
-      ]
+      "color_rgb": [217, 47, 145]
+    },
+    "BIPS_L": {
+      "id": 720575940622581173,
+      "group": "BIPS",
+      "color_hex": "#00897B",
+      "color_rgb": [0, 137, 123]
+    },
+    "BIPS_R": {
+      "id": 720575940623618708,
+      "group": "BIPS",
+      "color_hex": "#26A69A",
+      "color_rgb": [38, 166, 154]
+    },
+    "H2_L": {
+      "id": 720575940631999685,
+      "group": "H2",
+      "color_hex": "#F9A825",
+      "color_rgb": [249, 168, 37]
+    },
+    "H2_R": {
+      "id": 720575940632427603,
+      "group": "H2",
+      "color_hex": "#FDD835",
+      "color_rgb": [253, 216, 53]
     }
   },
   "synapse_groups": [
     "MOT",
-    "MOS"
+    "MOS",
+    "VS",
+    "HS",
+    "BIPS",
+    "H2"
   ],
   "_synapse_groups_comment": "Synapses are loaded only for neurons in these groups (pre or post).",
   "top_patches": 10,
@@ -207,21 +163,21 @@
     "HSE_L",
     "HSE_R",
     "HSS_L",
-    "HSS_R"
+    "HSS_R",
+    "BIPS_L",
+    "BIPS_R",
+    "H2_L",
+    "H2_R"
   ],
-  "_viewer_neurons_comment": "Subset of neurons shown in the EM viewer (skip VS5-VS8 which have no contacts).",
+  "_viewer_neurons_comment": "All 22 neurons shown in the EM viewer.",
+  "face_decimation_nm": 80,
+  "_face_decimation_nm_comment": "Overlap face vertex rounding step (nm) for slight decimation in the viewer. 0 = no decimation.",
   "pairing_rules": {
-    "_comment": "Defines which neuron groups are analysed against each other. Each rule is [source_groups, target_groups, bidirectional].",
+    "_comment": "ALL-vs-ALL: every group paired with every other group for overlap analysis.",
     "rules": [
       {
-        "source": [
-          "MOT",
-          "MOS"
-        ],
-        "target": [
-          "HS",
-          "VS"
-        ],
+        "source": ["MOT", "MOS", "VS", "HS", "BIPS", "H2"],
+        "target": ["MOT", "MOS", "VS", "HS", "BIPS", "H2"],
         "bidirectional": true
       }
     ]

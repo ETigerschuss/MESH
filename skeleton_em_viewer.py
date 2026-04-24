@@ -1,10 +1,41 @@
 """
-Skeleton EM Viewer
-==================
+Skeleton EM Viewer — Interactive Circuit Reconstruction & Circuit Model
+=========================================================================
 
-A self-contained, interactive 3D viewer for electron-microscopy (EM) circuit
-reconstruction data.  One Python run produces a single, standalone HTML file
-that embeds all data, Plotly, and JavaScript — no server required.
+A self-contained, interactive 3D + 2D viewer for electron-microscopy (EM) circuit
+reconstruction with integrated neural circuit simulation model.  One Python run
+produces a single, standalone HTML file that embeds all data, Plotly, and
+JavaScript — no server required.
+
+KEY FEATURES
+------------
+1. **3D Visualization:**
+   - Neuron meshes (colored by neuron group)
+   - Overlap faces (contact regions between neurons)
+   - Contact points (synaptic sites)
+   - Interactive rotation, pan, zoom
+
+2. **2D EM Snapshots:**
+   - Segmentation overlays (colored by neurons)
+   - Z-stack navigation (±20 slices)
+   - **DELETION:** Remove false positives by deleting individual Z-slices
+     → Area is automatically recalculated from remaining slices
+   - **EXPORT:** Download snapshots with coordinates in filename & metadata
+
+3. **Overlap Area Proofreading:**
+   - Interactive overlap matrix (clickable cells)
+   - Mark false positives for elimination
+   - Real-time area recalculation
+   - Audit trail of deletions
+
+4. **Tier-1 Circuit Simulation (Experimental):**
+   - Hodgkin-Huxley-like spiking model for MOT/MOS motor neurons
+   - Compartmental LPTCs (VS/HS wide-field neurons)
+   - Gap junctions + chemical synapses
+   - **NEURON DELETION:** Test circuit robustness by removing individual neurons
+     → Deleted neurons automatically excluded from synaptic transmission & coupling
+   - Bilateral pseudopupil output (eye motion tuning)
+   - Auto-calibration for resting firing rates
 
 STANDALONE USAGE
 ----------------
@@ -376,8 +407,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     <button id="btnNextZ">&gt;</button>
                 </div>
                 <div class="control-row" style="gap:8px;flex-wrap:wrap;">
-                    <span class="control-label">EM Opacity:</span>
-                    <input type="range" id="emOpacitySlider" min="10" max="100" value="100" step="1" style="width:120px;">
+                    <span class="control-label">EM Contrast:</span>
+                    <input type="range" id="emOpacitySlider" min="50" max="250" value="100" step="5" style="width:120px;">
                     <span id="emOpacityValue" class="control-value" style="min-width:45px;">100%</span>
                     <button id="btnDownloadEM" title="Download current EM image with coordinates and touching cells">&#128247; Download EM</button>
                 </div>
@@ -1248,13 +1279,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
         }
 
-        // Debounced EM opacity update to avoid excessive re-renders
+        // Debounced EM contrast update to avoid excessive re-renders
         let emOpacityDebounceTimer = null;
         function updateEMOpacity() {
             if (emOpacityDebounceTimer !== null) clearTimeout(emOpacityDebounceTimer);
             emOpacityDebounceTimer = setTimeout(() => {
-                const pct = Math.max(10, Math.min(100, parseInt(emOpacitySlider.value || '100', 10)));
-                emImage.style.opacity = String(pct / 100);
+                const pct = Math.max(50, Math.min(250, parseInt(emOpacitySlider.value || '100', 10)));
+                emImage.style.opacity = '1';
+                emImage.style.filter = 'contrast(' + pct + '%)';
                 emOpacityValue.textContent = pct + '%';
                 emOpacityDebounceTimer = null;
             }, 50);  // 50ms debounce
@@ -1269,15 +1301,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const width = img.naturalWidth || img.width || 1024;
             const height = img.naturalHeight || img.height || 768;
             const absZ = Math.round(curItemZnm + currentZ * 40);
+            const midX = Math.round(curItemX);
+            const midY = Math.round(curItemY);
             const touching = (currentSource && currentTarget) ? (currentSource + ' <-> ' + currentTarget) : 'n/a';
             const line1 = currentKind.toUpperCase() + ' #' + currentIdx + '  z=' + currentZ + ' (' + absZ + ' nm)';
-            const line2 = 'coords: (' + Math.round(curItemX) + ', ' + Math.round(curItemY) + ', ' + absZ + ')';
+            const line2 = 'slice midpoint: (' + midX + ', ' + midY + ', ' + absZ + ')';
             const line3 = 'touching cells: ' + touching;
-            const fileName = 'em_' + currentKind + '_' + currentIdx + '_z' + (currentZ >= 0 ? '+' : '-')
-                + String(Math.abs(currentZ)).padStart(3, '0') + '.png';
+            const fileName = 'em_' + currentKind + '_' + currentIdx
+                + '_x' + midX + '_y' + midY + '_z' + absZ
+                + '_zoff' + (currentZ >= 0 ? '+' : '-') + String(Math.abs(currentZ)).padStart(3, '0') + '.png';
 
-            const dl = document.createElement('a');
-            dl.download = fileName;
+            let pngUrl = img.src;
             try {
                 const canvas = document.createElement('canvas');
                 canvas.width = width;
@@ -1296,14 +1330,43 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 ctx.fillText(line2, 12, height - 22);
                 ctx.fillText(line3, 12, height - 6);
 
-                dl.href = canvas.toDataURL('image/png');
+                pngUrl = canvas.toDataURL('image/png');
             } catch (e) {
                 // Fallback for security-restricted canvases (e.g., strict file:// contexts)
-                dl.href = img.src;
+                pngUrl = img.src;
             }
-            document.body.appendChild(dl);
-            dl.click();
-            dl.remove();
+
+            const popup = window.open('', '_blank');
+            if (!popup) {
+                const dl = document.createElement('a');
+                dl.download = fileName;
+                dl.href = pngUrl;
+                document.body.appendChild(dl);
+                dl.click();
+                dl.remove();
+                return;
+            }
+
+            const safeTitle = (currentSource || '?') + ' -> ' + (currentTarget || '?');
+            popup.document.write(
+                '<!doctype html><html><head><meta charset="utf-8"><title>' + fileName + '</title>'
+                + '<style>body{font-family:Arial,sans-serif;background:#111;color:#eee;margin:16px;}'
+                + '.meta{margin-bottom:10px;line-height:1.45;} img{max-width:100%;height:auto;border:1px solid #444;}'
+                + 'button{margin-right:8px;padding:6px 10px;background:#2a2a2a;color:#fff;border:1px solid #555;cursor:pointer;}'
+                + '</style></head><body>'
+                + '<div class="meta"><div><b>' + safeTitle + '</b></div><div>' + line1 + '</div><div>' + line2 + '</div><div>' + line3 + '</div></div>'
+                + '<div><button id="dlBtn">Download PNG</button><button id="closeBtn">Close</button></div>'
+                + '<div style="margin-top:12px;"><img src="' + pngUrl + '" alt="EM snapshot"></div>'
+                + '<script>'
+                + 'const u=' + JSON.stringify(pngUrl) + ';'
+                + 'const f=' + JSON.stringify(fileName) + ';'
+                + 'document.getElementById("dlBtn").onclick=function(){const a=document.createElement("a");a.href=u;a.download=f;document.body.appendChild(a);a.click();a.remove();};'
+                + 'document.getElementById("closeBtn").onclick=function(){window.close();};'
+                + 'setTimeout(function(){document.getElementById("dlBtn").click();}, 40);'
+                + '<\/script>'
+                + '</body></html>'
+            );
+            popup.document.close();
         }
 
         emOpacitySlider.addEventListener('input', updateEMOpacity);
@@ -1456,7 +1519,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         // Each sub-cluster has area_um2 and orig_n_slices.
         // Compute overall remaining fraction, apply to each tableRow's original area.
         function recalcPairArea(source, target) {
-            // Find all sub-clusters for this undirected pair
+            // FEATURE: EM SLICE DELETION → AREA RECALCULATION
+            // When user deletes individual Z-slices or entire overlap pairs,
+            // this function recalculates the total contact/overlap area.
+            // 
+            // Algorithm:
+            // 1. Find all spatial sub-clusters for this neuron pair (there may be multiple
+            //    disconnected contact regions > 10 um apart, each getting its own cluster)
+            // 2. For each sub-cluster, compute remaining area as:
+            //    orig_area_um2 * (remaining_slices / original_slices)
+            //    This gives proportional area loss (e.g., delete 2/10 slices → 80% area remains)
+            // 3. Sum across all sub-clusters = total pair area
+            // 4. Update the overlap matrix table to show new area
+            
             const subs = overlapList.filter(
                 o => (o.source === source && o.target === target)
                   || (o.source === target && o.target === source));
@@ -1464,20 +1539,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             let totalRemainArea = 0;
             let allEliminated = true;
             subs.forEach(sub => {
-                const origN = sub.orig_n_slices || 1;
-                const curN = (sub.valid_z || []).length;
+                const origN = sub.orig_n_slices || 1;  // Original slice count
+                const curN = (sub.valid_z || []).length;  // Current remaining slices
                 totalOrigArea += sub.area_um2;
                 if (curN > 0) {
+                    // Proportional area: only count remaining slices
                     totalRemainArea += sub.area_um2 * (curN / origN);
                     allEliminated = false;
                 }
             });
             const fraction = totalOrigArea > 0
                 ? totalRemainArea / totalOrigArea : 0;
-            // Update both directions in overlapTable
+            // Update both directions in overlapTable (undirected pairs)
             const tableRows = findTableRows(source, target);
             tableRows.forEach(row => {
-                if (!row._orig_area) row._orig_area = row.area;
+                if (!row._orig_area) row._orig_area = row.area;  // Save original before first deletion
                 row.area = allEliminated ? 0 : row._orig_area * fraction;
                 row.status = allEliminated ? 'eliminated' : 'active';
             });
@@ -2403,15 +2479,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             let pGgradExc = 0.005, pGgradInh = 0.004;
             let pGspikeExc = 0.02, pGspikeInh = 0.016, pTauSyn = 5;
             let pVthresh = -40, pVscale = 20;
+            const simPreRollMs = 500;
 
             function buildAndRun() {
-                const disabledNodeSet = new Set(circuitDisabledNodes);
+                // FEATURE: CIRCUIT NEURON DELETION
+                // Support for removing individual neurons from the simulation.
+                // This is used to understand circuit dependency and test single-neuron lesions.
+                // 
+                // Deleted neurons (stored in circuitDisabledNodes set) are excluded from:
+                // 1. Synapse transmission (both directions)
+                // 2. Gap junction coupling (bidirectional electrical coupling)
+                // 3. Stimulus injection (they cannot be stimulated)
+                // 4. Output recording (cleaner traces)
+                
+                const disabledNodeSet = new Set(circuitDisabledNodes);  // User-selected deletions
                 // ── Instantiate cells ──
                 const cells = [];
                 const VS_Vr  = [pVS_Vr1, pVS_Vr1 + pVS_VrStep, pVS_Vr1 + 2 * pVS_VrStep, pVS_Vr1 + 3 * pVS_VrStep];
                 const VS_Rin = [pVS_Rin1, pVS_Rin1 + pVS_RinStep, pVS_Rin1 + 2 * pVS_RinStep, pVS_Rin1 + 3 * pVS_RinStep];
                 CELL_NAMES.forEach(n => {
-                    const enabled = !disabledNodeSet.has(n);
+                    const enabled = !disabledNodeSet.has(n);  // Mark deleted neurons as disabled
                     let cell;
                     if (n.startsWith('VS')) {
                         const k = parseInt(n[2]) - 1;
@@ -2426,15 +2513,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         // Other cells (BIPS/H2) use MOT defaults unless split out later.
                         cell = createMN(n, pMOT_Rin, pMOT_VL, pMOT_GVT, pMOT_GL, pMOT_GNa, pMOT_GK, pMOT_GNaP);
                     }
-                    cell.enabled = enabled;
+                    cell.enabled = enabled;  // Store enabled flag for synapse checks
                     cells.push(cell);
                 });
 
                 // ── Chemical synapses from RAW_COUNTS ──
+                // Only create synapses between enabled neurons
                 const synapses = [];
                 for (let pi = 0; pi < N_CELLS; pi++) {
                     for (let qi = 0; qi < N_CELLS; qi++) {
                         const cnt = RAW_COUNTS[pi][qi];
+                        // DELETION CHECK: Skip synapses if pre or post neuron is disabled
                         if (cnt === 0 || !cells[pi].enabled || !cells[qi].enabled) continue;
                         const Erev = SYN_ESYN[pi][qi];
                         const gPerSyn = (Erev < -10)
@@ -2449,11 +2538,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 }
 
                 // ── Gap junctions (bidirectional, LP-filtered) ──
+                // Only create gap junctions between enabled neuron pairs
                 const gjList = [];
                 // Within VS chains (VS1↔VS2↔VS3↔VS4)
                 ['L','R'].forEach(s => {
                     for (let k = 1; k <= 3; k++) {
                         const a = CI['VS'+k+'_'+s], b = CI['VS'+(k+1)+'_'+s];
+                        // DELETION CHECK: Only create GJ if both neurons are enabled
                         if (cells[a].enabled && cells[b].enabled)
                             gjList.push({ a, b, gj: createGJ(pGlptc, pClptc) });
                     }
@@ -2462,20 +2553,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         gjList.push({ a: CI['HSN_'+s], b: CI['HSE_'+s], gj: createGJ(pGlptc, pClptc) });
                     if (cells[CI['HSE_'+s]].enabled && cells[CI['HSS_'+s]].enabled)
                         gjList.push({ a: CI['HSE_'+s], b: CI['HSS_'+s], gj: createGJ(pGlptc, pClptc) });
-                    // VS \u2194 MOS (bidirectional)
+                    // VS ↔ MOS (bidirectional)
                     const mos = CI['MOS_'+s], mot = CI['MOT_'+s];
                     for (let k = 1; k <= 4; k++) {
                         const a = CI['VS'+k+'_'+s];
                         if (cells[a].enabled && cells[mos].enabled)
                             gjList.push({ a, b: mos, gj: createGJ(pGvsmos, pCmn) });
                     }
-                    // HS \u2194 MOS (bidirectional)
+                    // HS ↔ MOS (bidirectional)
                     ['HSN','HSE','HSS'].forEach(h => {
                         const a = CI[h+'_'+s];
                         if (cells[a].enabled && cells[mos].enabled)
                             gjList.push({ a, b: mos, gj: createGJ(pGhsmos, pCmn) });
                     });
-                    // HS \u2194 MOT (bidirectional; VS does NOT connect to MOT)
+                    // HS ↔ MOT (bidirectional; VS does NOT connect to MOT)
                     ['HSN','HSE','HSS'].forEach(h => {
                         const a = CI[h+'_'+s];
                         if (cells[a].enabled && cells[mot].enabled)
@@ -2484,7 +2575,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 });
 
                 // ── Simulation ──
-                const nSteps = Math.round(simTime / dt);
+                const totalSimTime = simTime + simPreRollMs;
+                const nSteps = Math.round(totalSimTime / dt);
                 const rec = {};
                 CELL_NAMES.forEach(n => { rec[n] = new Float32Array(nSteps); });
                 const tArr = new Float32Array(nSteps);
@@ -2515,7 +2607,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
                     // 3. External stimulus
                     const extI = new Float64Array(N_CELLS);
-                    if (t >= stimStart && t <= stimEnd) {
+                    const stimStartAbs = simPreRollMs + stimStart;
+                    const stimEndAbs = simPreRollMs + stimEnd;
+                    if (t >= stimStartAbs && t <= stimEndAbs) {
                         stimTargets.forEach(sn => {
                             if (CI[sn] !== undefined && cells[CI[sn]].enabled) extI[CI[sn]] += stimAmp;
                         });
@@ -2544,7 +2638,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         rec[CELL_NAMES[n]][step] = cells[n].V;
                     }
                 }
-                return { t: tArr, records: rec };
+                return { t: tArr, records: rec, preRollMs: simPreRollMs };
             }
 
             // ── Simulation state ──
@@ -2578,6 +2672,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 + '<option value="VS_R">VS Right (1-4)</option>'
                 + '<option value="HS_L">HS Left</option>'
                 + '<option value="HS_R">HS Right</option>'
+                + '<option value="VS_ALL">All VS (both sides)</option>'
+                + '<option value="HS_ALL">All HS (both sides)</option>'
                 + '<option value="ALL_L">All Left LPTCs</option>'
                 + '<option value="ALL_R">All Right LPTCs</option>'
                 + '<option value="MN_L">MOS+MOT Left</option>'
@@ -2624,10 +2720,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             html += '<label style="color:#ccc;font-size:10px;">Noise: '
                 + '<input id="circNoise" type="number" value="3" step="0.5" min="0" max="10" '
                 + 'style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ffab91;font-size:10px;" title="Target resting MOT firing rate (Hz) used by auto-calibration.">MOT rest target: '
+                + '<input id="pMOT_TargetRestHz" type="number" value="120" step="5" min="0" max="300" '
+                + 'style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<label style="color:#ef9a9a;font-size:10px;" title="Target resting MOS firing rate (Hz) used by auto-calibration.">MOS rest target: '
+                + '<input id="pMOS_TargetRestHz" type="number" value="100" step="5" min="0" max="300" '
+                + 'style="width:45px;background:#333;color:#fff;border:1px solid #555;font-size:10px;"></label>';
+            html += '<button id="circPresetMotor" style="background:#455a64;color:#fff;border:1px solid #607d8b;'
+                + 'padding:4px 10px;border-radius:3px;cursor:pointer;font-size:10px;">'
+                + 'Preset: MOT~120 / MOS~100</button>';
+            html += '<button id="circCalibrateRestHz" style="background:#5d4037;color:#fff;border:1px solid #8d6e63;'
+                + 'padding:4px 10px;border-radius:3px;cursor:pointer;font-size:10px;">'
+                + 'Auto-Calibrate Rest Hz (Intrinsic-first)</button>';
             html += '<button id="circRun" style="background:#2E7D32;color:#fff;border:1px solid #4CAF50;'
                 + 'padding:4px 14px;border-radius:3px;cursor:pointer;font-size:11px;font-weight:bold;">'
                 + '\u25b6 Run</button>';
             html += '</div>';
+            html += '<div id="circCalibStatus" style="margin-top:6px;color:#90caf9;font-size:10px;line-height:1.35;'
+                + 'border:1px solid #37474f;background:#121820;padding:6px;border-radius:4px;">'
+                + 'Calibration report: none yet.</div>';
             html += '</div>';
 
             // ── Cell Parameters ──
@@ -2807,9 +2918,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             html += '</div></details>';
 
             // Plot areas
-            html += '<div id="circPlotLPTC" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>';
-            html += '<div id="circPlotMN" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>';
-            html += '<div id="circPlotPupilTime" style="width:100%;height:210px;background:#1a1a1a;border:1px solid #444;"></div>';
+            html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">'
+                + '<div id="circPlotLPTC_R" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '<div id="circPlotLPTC_L" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '</div>';
+            html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">'
+                + '<div id="circPlotMN_R" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '<div id="circPlotMN_L" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '</div>';
+            html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">'
+                + '<div id="circPlotPupilTime_R" style="width:100%;height:210px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '<div id="circPlotPupilTime_L" style="width:100%;height:210px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '</div>';
             html += '<div id="circPlotPupilPolar" style="width:100%;height:230px;background:#1a1a1a;border:1px solid #444;"></div>';
             html += '</div>';
 
@@ -3037,6 +3157,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 'VS_R':  ['VS1_R','VS2_R','VS3_R','VS4_R'],
                 'HS_L':  ['HSN_L','HSE_L','HSS_L'],
                 'HS_R':  ['HSN_R','HSE_R','HSS_R'],
+                'VS_ALL':['VS1_L','VS2_L','VS3_L','VS4_L','VS1_R','VS2_R','VS3_R','VS4_R'],
+                'HS_ALL':['HSN_L','HSE_L','HSS_L','HSN_R','HSE_R','HSS_R'],
                 'ALL_L': ['VS1_L','VS2_L','VS3_L','VS4_L','HSN_L','HSE_L','HSS_L'],
                 'ALL_R': ['VS1_R','VS2_R','VS3_R','VS4_R','HSN_R','HSE_R','HSS_R'],
                 'MN_L':  ['MOS_L','MOT_L'],
@@ -3109,10 +3231,230 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 pupilUseRawRate       = document.getElementById('pupilUseRawRate').checked;
             }
 
+            function applyMotorTargetPreset() {
+                const setVal = (id, v) => {
+                    const el = document.getElementById(id);
+                    if (el) el.value = String(v);
+                };
+
+                // MOT: baseline around 120 Hz, mostly release-directed, capped near 140 Hz in typical runs.
+                setVal('pMOT_VLm', -62);
+                setVal('pMOT_GNaP', 0.95);
+                setVal('pMOT_GNa', 145);
+                setVal('pMOT_GKm', 58);
+                setVal('pMOT_GLm', 0.42);
+                setVal('pMOT_RinM', 260);
+                setVal('pMOT_IbiasM', 3.6);
+                setVal('pMOT_GVTm', 0.0);
+
+                // MOS: baseline around 100 Hz with larger dynamic range up to about 200 Hz.
+                setVal('pMOS_VLm', -63);
+                setVal('pMOS_GNaP', 1.45);
+                setVal('pMOS_GNa', 170);
+                setVal('pMOS_GKm', 46);
+                setVal('pMOS_GLm', 0.28);
+                setVal('pMOS_RinM', 360);
+                setVal('pMOS_IbiasM', 4.2);
+                setVal('pMOS_GVTm', 0.0);
+
+                // Cleaner pseudopupil inspection of true circuit motion.
+                setVal('pupilBaselineStart', 0);
+                setVal('pupilBaselineWindow', 140);
+                const jitter = document.getElementById('pupilDisableJitter');
+                if (jitter) jitter.checked = true;
+                const rawRate = document.getElementById('pupilUseRawRate');
+                if (rawRate) rawRate.checked = false;
+            }
+
+            function estimateRestRateHz(vm, tArr, tEndMs) {
+                // Lightweight spike-rate estimator for pre-stim resting window.
+                const dtMs = (tArr.length > 1) ? (tArr[1] - tArr[0]) : 0.01;
+                const thr = -15;
+                const refractory = Math.max(1, Math.round(4.0 / dtMs));
+                let lastSpike = -refractory;
+                let spikes = 0;
+                let nSamples = 0;
+                for (let i = 1; i < vm.length; i++) {
+                    if (tArr[i] >= tEndMs) break;
+                    nSamples++;
+                    if (vm[i - 1] < thr && vm[i] >= thr && (i - lastSpike) >= refractory) {
+                        spikes++;
+                        lastSpike = i;
+                    }
+                }
+                const durS = Math.max(1e-6, (nSamples * dtMs) / 1000.0);
+                return spikes / durS;
+            }
+
+            function calibrateRestHzTargets() {
+                const tMOT = parseFloat(document.getElementById('pMOT_TargetRestHz').value);
+                const tMOS = parseFloat(document.getElementById('pMOS_TargetRestHz').value);
+                const targetMOT = isNaN(tMOT) ? 120 : tMOT;
+                const targetMOS = isNaN(tMOS) ? 100 : tMOS;
+                const ibMotEl = document.getElementById('pMOT_IbiasM');
+                const ibMosEl = document.getElementById('pMOS_IbiasM');
+                const gGradInhEl = document.getElementById('pGgradInh');
+                const gSpikeInhEl = document.getElementById('pGspikeInh');
+                const vlMotEl = document.getElementById('pMOT_VLm');
+                const vlMosEl = document.getElementById('pMOS_VLm');
+                const gnapMotEl = document.getElementById('pMOT_GNaP');
+                const gnapMosEl = document.getElementById('pMOS_GNaP');
+                const gkMotEl = document.getElementById('pMOT_GKm');
+                const gkMosEl = document.getElementById('pMOS_GKm');
+                if (!ibMotEl || !ibMosEl || !vlMotEl || !vlMosEl || !gnapMotEl || !gnapMosEl || !gkMotEl || !gkMosEl) return;
+
+                const keepGradInh = gGradInhEl ? gGradInhEl.value : null;
+                const keepSpikeInh = gSpikeInhEl ? gSpikeInhEl.value : null;
+
+                let ibMot = parseFloat(ibMotEl.value);
+                let ibMos = parseFloat(ibMosEl.value);
+                let vlMot = parseFloat(vlMotEl.value);
+                let vlMos = parseFloat(vlMosEl.value);
+                let gnapMot = parseFloat(gnapMotEl.value);
+                let gnapMos = parseFloat(gnapMosEl.value);
+                let gkMot = parseFloat(gkMotEl.value);
+                let gkMos = parseFloat(gkMosEl.value);
+                if (isNaN(ibMot)) ibMot = 0;
+                if (isNaN(ibMos)) ibMos = 0;
+                if (isNaN(vlMot)) vlMot = -65;
+                if (isNaN(vlMos)) vlMos = -65;
+                if (isNaN(gnapMot)) gnapMot = 0.5;
+                if (isNaN(gnapMos)) gnapMos = 0.5;
+                if (isNaN(gkMot)) gkMot = 36;
+                if (isNaN(gkMos)) gkMos = 36;
+
+                // Step 1 (option 4): fit intrinsic excitability first, with near-zero tonic bias.
+                ibMot = Math.max(-2, Math.min(2, ibMot));
+                ibMos = Math.max(-2, Math.min(2, ibMos));
+                for (let iter = 0; iter < 10; iter++) {
+                    vlMotEl.value = String(vlMot);
+                    vlMosEl.value = String(vlMos);
+                    gnapMotEl.value = String(gnapMot);
+                    gnapMosEl.value = String(gnapMos);
+                    gkMotEl.value = String(gkMot);
+                    gkMosEl.value = String(gkMos);
+                    ibMotEl.value = String(ibMot);
+                    ibMosEl.value = String(ibMos);
+
+                    readParams();
+                    const res = buildAndRun();
+                    const tArr = Array.from(res.t);
+                    const motL = estimateRestRateHz(res.records['MOT_L'], tArr, simPreRollMs);
+                    const motR = estimateRestRateHz(res.records['MOT_R'], tArr, simPreRollMs);
+                    const mosL = estimateRestRateHz(res.records['MOS_L'], tArr, simPreRollMs);
+                    const mosR = estimateRestRateHz(res.records['MOS_R'], tArr, simPreRollMs);
+                    const motHz = 0.5 * (motL + motR);
+                    const mosHz = 0.5 * (mosL + mosR);
+
+                    const eMot = targetMOT - motHz;
+                    const eMos = targetMOS - mosHz;
+                    if (Math.abs(eMot) < 4 && Math.abs(eMos) < 4) break;
+
+                    // Intrinsic-first updates:
+                    // More depolarized VL, larger gNaP, smaller gK -> higher spontaneous firing.
+                    vlMot += 0.012 * eMot;
+                    vlMos += 0.012 * eMos;
+                    gnapMot += 0.0030 * eMot;
+                    gnapMos += 0.0030 * eMos;
+                    gkMot -= 0.020 * eMot;
+                    gkMos -= 0.020 * eMos;
+
+                    vlMot = Math.max(-80, Math.min(-45, vlMot));
+                    vlMos = Math.max(-80, Math.min(-45, vlMos));
+                    gnapMot = Math.max(0.0, Math.min(3.0, gnapMot));
+                    gnapMos = Math.max(0.0, Math.min(3.0, gnapMos));
+                    gkMot = Math.max(8, Math.min(150, gkMot));
+                    gkMos = Math.max(8, Math.min(150, gkMos));
+                }
+
+                // Step 2: small residual Ibias correction only.
+                for (let iter = 0; iter < 4; iter++) {
+                    vlMotEl.value = String(vlMot);
+                    vlMosEl.value = String(vlMos);
+                    gnapMotEl.value = String(gnapMot);
+                    gnapMosEl.value = String(gnapMos);
+                    gkMotEl.value = String(gkMot);
+                    gkMosEl.value = String(gkMos);
+                    ibMotEl.value = String(ibMot);
+                    ibMosEl.value = String(ibMos);
+
+                    readParams();
+                    const res = buildAndRun();
+                    const tArr = Array.from(res.t);
+                    const motL = estimateRestRateHz(res.records['MOT_L'], tArr, simPreRollMs);
+                    const motR = estimateRestRateHz(res.records['MOT_R'], tArr, simPreRollMs);
+                    const mosL = estimateRestRateHz(res.records['MOS_L'], tArr, simPreRollMs);
+                    const mosR = estimateRestRateHz(res.records['MOS_R'], tArr, simPreRollMs);
+                    const motHz = 0.5 * (motL + motR);
+                    const mosHz = 0.5 * (mosL + mosR);
+                    const eMot = targetMOT - motHz;
+                    const eMos = targetMOS - mosHz;
+                    if (Math.abs(eMot) < 2 && Math.abs(eMos) < 2) break;
+
+                    ibMot += 0.012 * eMot;
+                    ibMos += 0.012 * eMos;
+                    ibMot = Math.max(-6, Math.min(6, ibMot));
+                    ibMos = Math.max(-6, Math.min(6, ibMos));
+                }
+
+                vlMotEl.value = vlMot.toFixed(2);
+                vlMosEl.value = vlMos.toFixed(2);
+                gnapMotEl.value = gnapMot.toFixed(3);
+                gnapMosEl.value = gnapMos.toFixed(3);
+                gkMotEl.value = gkMot.toFixed(2);
+                gkMosEl.value = gkMos.toFixed(2);
+                ibMotEl.value = ibMot.toFixed(2);
+                ibMosEl.value = ibMos.toFixed(2);
+                if (gGradInhEl && keepGradInh !== null) gGradInhEl.value = keepGradInh;
+                if (gSpikeInhEl && keepSpikeInh !== null) gSpikeInhEl.value = keepSpikeInh;
+                readParams();
+                const res = buildAndRun();
+                plotResults(res);
+
+                const tArr = Array.from(res.t);
+                const restEndMs = res.preRollMs || simPreRollMs;
+                const motHz = 0.5 * (
+                    estimateRestRateHz(res.records['MOT_L'], tArr, restEndMs) +
+                    estimateRestRateHz(res.records['MOT_R'], tArr, restEndMs)
+                );
+                const mosHz = 0.5 * (
+                    estimateRestRateHz(res.records['MOS_L'], tArr, restEndMs) +
+                    estimateRestRateHz(res.records['MOS_R'], tArr, restEndMs)
+                );
+                const status = document.getElementById('circCalibStatus');
+                if (status) {
+                    const dMot = motHz - targetMOT;
+                    const dMos = mosHz - targetMOS;
+                    status.innerHTML =
+                        'Calibration report: ' +
+                        'MOT ' + motHz.toFixed(1) + ' Hz (target ' + targetMOT.toFixed(1) + ', err ' + dMot.toFixed(1) + ') | ' +
+                        'MOS ' + mosHz.toFixed(1) + ' Hz (target ' + targetMOS.toFixed(1) + ', err ' + dMos.toFixed(1) + ')<br>' +
+                        'Fitted: MOT [VL=' + vlMot.toFixed(2) + ', gNaP=' + gnapMot.toFixed(3) + ', gK=' + gkMot.toFixed(2) + ', Ibias=' + ibMot.toFixed(2) + '] ; ' +
+                        'MOS [VL=' + vlMos.toFixed(2) + ', gNaP=' + gnapMos.toFixed(3) + ', gK=' + gkMos.toFixed(2) + ', Ibias=' + ibMos.toFixed(2) + ']';
+                }
+            }
+
             document.getElementById('circResetNodes').addEventListener('click', function() {
                 circuitDisabledNodes.clear();
                 updateCircuitToggleStatus();
                 drawWiring();
+            });
+
+            document.getElementById('circPresetMotor').addEventListener('click', function() {
+                applyMotorTargetPreset();
+            });
+
+            document.getElementById('circCalibrateRestHz').addEventListener('click', function() {
+                const prev = this.textContent;
+                const status = document.getElementById('circCalibStatus');
+                this.textContent = '\u23f3 Calibrating...';
+                this.disabled = true;
+                if (status) status.textContent = 'Calibration running...';
+                setTimeout(() => {
+                    calibrateRestHzTargets();
+                    this.textContent = prev;
+                    this.disabled = false;
+                }, 30);
             });
 
             document.getElementById('circRun').addEventListener('click', function() {
@@ -3127,10 +3469,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             function plotResults(res) {
                 const tMs = Array.from(res.t);
+                const preRollMs = res.preRollMs || simPreRollMs;
                 let step = 1;
                 if (tMs.length > 5000) step = Math.ceil(tMs.length / 5000);
                 const tPlot = [], indices = [];
-                for (let i = 0; i < tMs.length; i += step) { tPlot.push(tMs[i]); indices.push(i); }
+                for (let i = 0; i < tMs.length; i += step) {
+                    if (tMs[i] < preRollMs) continue;
+                    tPlot.push(tMs[i] - preRollMs);
+                    indices.push(i);
+                }
 
                 // LPTC traces
                 const lptcOrder = [];
@@ -3146,20 +3493,37 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     if (n.startsWith('VS')) lptcColors[n] = colsVS[vi++ % colsVS.length];
                     else lptcColors[n] = colsHS[hi++ % colsHS.length];
                 });
-                const lptcTraces = lptcOrder.map(n => ({
+                function addStimPatch(y0, y1) {
+                    return {
+                        x: [stimStart, stimEnd, stimEnd, stimStart],
+                        y: [y0, y0, y1, y1],
+                        fill: 'toself', fillcolor: 'rgba(255,255,0,0.08)',
+                        line: { width: 0 }, showlegend: false, hoverinfo: 'skip',
+                        type: 'scatter', mode: 'lines',
+                    };
+                }
+                const lptcLeft = lptcOrder.filter(n => n.endsWith('_L')).map(n => ({
                     x: tPlot, y: indices.map(i => res.records[n][i]),
                     name: n, type: 'scatter', mode: 'lines',
                     line: { color: lptcColors[n], width: 1 },
                 }));
-                lptcTraces.push({
-                    x: [stimStart, stimEnd, stimEnd, stimStart],
-                    y: [-80, -80, 20, 20],
-                    fill: 'toself', fillcolor: 'rgba(255,255,0,0.08)',
-                    line: { width: 0 }, showlegend: false, hoverinfo: 'skip',
-                    type: 'scatter', mode: 'lines',
-                });
-                Plotly.react('circPlotLPTC', lptcTraces, {
-                    title: { text: 'LPTCs (VS + HS) \u2014 soma Vm', font: { size: 11, color: '#ccc' } },
+                const lptcRight = lptcOrder.filter(n => n.endsWith('_R')).map(n => ({
+                    x: tPlot, y: indices.map(i => res.records[n][i]),
+                    name: n, type: 'scatter', mode: 'lines',
+                    line: { color: lptcColors[n], width: 1 },
+                }));
+                lptcLeft.push(addStimPatch(-80, 20));
+                lptcRight.push(addStimPatch(-80, 20));
+                Plotly.react('circPlotLPTC_L', lptcLeft, {
+                    title: { text: 'Left LPTCs — soma Vm', font: { size: 11, color: '#ccc' } },
+                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333' },
+                    yaxis: { title: 'mV', color: '#888', gridcolor: '#333', range: [-80, 20] },
+                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
+                    legend: { font: { size: 7, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.5)' },
+                    margin: { l: 40, r: 10, t: 26, b: 30 },
+                }, { responsive: true });
+                Plotly.react('circPlotLPTC_R', lptcRight, {
+                    title: { text: 'Right LPTCs — soma Vm', font: { size: 11, color: '#ccc' } },
                     xaxis: { title: 'ms', color: '#888', gridcolor: '#333' },
                     yaxis: { title: 'mV', color: '#888', gridcolor: '#333', range: [-80, 20] },
                     paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
@@ -3169,20 +3533,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
                 const mnNames = ['MOS_L','MOS_R','MOT_L','MOT_R'];
                 const mnColors = { MOS_L:'#ef5350', MOS_R:'#e53935', MOT_L:'#ff7043', MOT_R:'#ff5722' };
-                const mnTraces = mnNames.map(n => ({
+                const mnLeft = ['MOS_L','MOT_L'].map(n => ({
                     x: tPlot, y: indices.map(i => res.records[n][i]),
                     name: n, type: 'scatter', mode: 'lines',
                     line: { color: mnColors[n], width: 1.2 },
                 }));
-                mnTraces.push({
-                    x: [stimStart, stimEnd, stimEnd, stimStart],
-                    y: [-80, -80, 60, 60],
-                    fill: 'toself', fillcolor: 'rgba(255,255,0,0.08)',
-                    line: { width: 0 }, showlegend: false, hoverinfo: 'skip',
-                    type: 'scatter', mode: 'lines',
-                });
-                Plotly.react('circPlotMN', mnTraces, {
-                    title: { text: 'Motor Neurons (MOS + MOT) \u2014 soma Vm', font: { size: 11, color: '#ccc' } },
+                const mnRight = ['MOS_R','MOT_R'].map(n => ({
+                    x: tPlot, y: indices.map(i => res.records[n][i]),
+                    name: n, type: 'scatter', mode: 'lines',
+                    line: { color: mnColors[n], width: 1.2 },
+                }));
+                mnLeft.push(addStimPatch(-80, 60));
+                mnRight.push(addStimPatch(-80, 60));
+                Plotly.react('circPlotMN_L', mnLeft, {
+                    title: { text: 'Left Motor Neurons — soma Vm', font: { size: 11, color: '#ccc' } },
+                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333' },
+                    yaxis: { title: 'mV', color: '#888', gridcolor: '#333', range: [-80, 60] },
+                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
+                    legend: { font: { size: 9, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.5)' },
+                    margin: { l: 40, r: 10, t: 26, b: 30 },
+                }, { responsive: true });
+                Plotly.react('circPlotMN_R', mnRight, {
+                    title: { text: 'Right Motor Neurons — soma Vm', font: { size: 11, color: '#ccc' } },
                     xaxis: { title: 'ms', color: '#888', gridcolor: '#333' },
                     yaxis: { title: 'mV', color: '#888', gridcolor: '#333', range: [-80, 60] },
                     paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
@@ -3301,7 +3673,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         motPull: mirrorRightToLeft(rightCal.motPull),
                     };
                     // Use user-defined baseline window (start offset + duration)
-                    const baselineEndTime = stimStart + pupilBaselineStart;
+                    const baselineEndTime = preRollMs + stimStart + pupilBaselineStart;
                     const bMos = meanPre(mosRate, tMs, baselineEndTime, pupilBaselineWindow);
                     const bMot = meanPre(motRate, tMs, baselineEndTime, pupilBaselineWindow);
                     const DEAD = 5.0;  // Hz dead-zone: ignore sub-threshold fluctuations
@@ -3309,6 +3681,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     const y = new Float32Array(mosRate.length);
                     const r = new Float32Array(mosRate.length);
                     const th = new Float32Array(mosRate.length);
+                    const mosX = new Float32Array(mosRate.length), mosY = new Float32Array(mosRate.length);
+                    const motX = new Float32Array(mosRate.length), motY = new Float32Array(mosRate.length);
                     for (let i = 0; i < mosRate.length; i++) {
                         // Option: use raw rate or baseline-subtracted
                         const dMos = pupilUseRawRate ? mosRate[i] : (mosRate[i] - bMos);
@@ -3319,12 +3693,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         const dMotDZ = Math.abs(rawDMot) < DEAD ? 0 : rawDMot - Math.sign(rawDMot) * DEAD;
 
                         const vec = { x: 0, y: 0 };
+                        const vecMos = { x: 0, y: 0 };
+                        const vecMot = { x: 0, y: 0 };
 
                         // Individual component pulls/releases
-                        addPolar(vec, satPull(Math.max(0, dMosDZ), 40), cal.mosPull);
-                        addPolar(vec, satRelease(Math.max(0, -dMosDZ), 26), cal.mosRelease);
-                        addPolar(vec, satPull(Math.max(0, dMotDZ), 40), cal.motPull);
-                        addPolar(vec, satRelease(Math.max(0, -dMotDZ), 26), cal.motRelease);
+                        addPolar(vecMos, satPull(Math.max(0, dMosDZ), 40), cal.mosPull);
+                        addPolar(vecMos, satRelease(Math.max(0, -dMosDZ), 26), cal.mosRelease);
+                        addPolar(vecMot, satPull(Math.max(0, dMotDZ), 40), cal.motPull);
+                        addPolar(vecMot, satRelease(Math.max(0, -dMotDZ), 26), cal.motRelease);
+                        vec.x += vecMos.x + vecMot.x;
+                        vec.y += vecMos.y + vecMot.y;
 
                         // Cooperative term when both rise/fall together
                         const bothUp = Math.min(Math.max(0, dMosDZ), Math.max(0, dMotDZ));
@@ -3354,16 +3732,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         let rr = Math.sqrt(px * px + py * py);
                         if (rr > 10) { px *= 10 / rr; py *= 10 / rr; rr = 10; }
                         x[i] = px; y[i] = py; r[i] = rr;
+                        mosX[i] = vecMos.x; mosY[i] = vecMos.y;
+                        motX[i] = vecMot.x; motY[i] = vecMot.y;
                         th[i] = (Math.atan2(py, px) * 180 / Math.PI + 360) % 360;
                     }
-                    return { x, y, r, th };
+                    return { x, y, r, th, mosX, mosY, motX, motY };
                 }
-                function overallVector(move) {
-                    const n = move.x.length;
+                function overallVectorFromXY(xArr, yArr) {
+                    const n = xArr.length;
                     const k = Math.max(5, Math.floor(0.1 * n));
                     let x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-                    for (let i = 0; i < k; i++) { x0 += move.x[i]; y0 += move.y[i]; }
-                    for (let i = n - k; i < n; i++) { x1 += move.x[i]; y1 += move.y[i]; }
+                    for (let i = 0; i < k; i++) { x0 += xArr[i]; y0 += yArr[i]; }
+                    for (let i = n - k; i < n; i++) { x1 += xArr[i]; y1 += yArr[i]; }
                     x0 /= k; y0 /= k; x1 /= k; y1 /= k;
                     const dx = x1 - x0, dy = y1 - y0;
                     return {
@@ -3371,6 +3751,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         r: Math.min(10, Math.sqrt(dx * dx + dy * dy))
                     };
                 }
+                function overallVector(move) { return overallVectorFromXY(move.x, move.y); }
 
                 const rateMOS_L = robustSpikeRateSeries(res.records['MOS_L'], tMs, 90);
                 const rateMOS_R = robustSpikeRateSeries(res.records['MOS_R'], tMs, 90);
@@ -3379,21 +3760,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 const moveL = buildPupilMotion('L', rateMOS_L, rateMOT_L);
                 const moveR = buildPupilMotion('R', rateMOS_R, rateMOT_R);
                 const vecL = overallVector(moveL), vecR = overallVector(moveR);
+                const mosVecL = overallVectorFromXY(moveL.mosX, moveL.mosY), mosVecR = overallVectorFromXY(moveR.mosX, moveR.mosY);
+                const motVecL = overallVectorFromXY(moveL.motX, moveL.motY), motVecR = overallVectorFromXY(moveR.motX, moveR.motY);
 
-                Plotly.react('circPlotPupilTime', [
+                Plotly.react('circPlotPupilTime_L', [
                     { x: tPlot, y: indices.map(i => rateMOS_L[i]), name: 'MOS_L rate', type: 'scatter', mode: 'lines', line: { color: '#ef5350', width: 1.1 } },
                     { x: tPlot, y: indices.map(i => rateMOT_L[i]), name: 'MOT_L rate', type: 'scatter', mode: 'lines', line: { color: '#ff7043', width: 1.1 } },
+                    { x: tPlot, y: indices.map(i => moveL.r[i]), name: 'Left pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#80cbc4', width: 1.6 } },
+                    { x: [stimStart, stimEnd, stimEnd, stimStart], y: [0, 0, 250, 250], fill: 'toself', fillcolor: 'rgba(255,255,0,0.06)', line: { width: 0 }, showlegend: false, hoverinfo: 'skip', type: 'scatter', mode: 'lines' }
+                ], {
+                    title: { text: 'Left Pseudopupil Output', font: { size: 11, color: '#ccc' } },
+                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333', range: [0, simTime] },
+                    yaxis: { title: 'Hz', color: '#888', gridcolor: '#333', rangemode: 'tozero' },
+                    yaxis2: { title: 'deg', overlaying: 'y', side: 'right', color: '#26c6da', range: [0, 10] },
+                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
+                    legend: { font: { size: 8, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.4)' },
+                    margin: { l: 38, r: 44, t: 24, b: 28 },
+                }, { responsive: true });
+                Plotly.react('circPlotPupilTime_R', [
                     { x: tPlot, y: indices.map(i => rateMOS_R[i]), name: 'MOS_R rate', type: 'scatter', mode: 'lines', line: { color: '#e53935', width: 1.1, dash: 'dot' } },
                     { x: tPlot, y: indices.map(i => rateMOT_R[i]), name: 'MOT_R rate', type: 'scatter', mode: 'lines', line: { color: '#ff5722', width: 1.1, dash: 'dot' } },
-                    { x: tPlot, y: indices.map(i => moveL.r[i]), name: 'Left pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#80cbc4', width: 1.6 } },
                     { x: tPlot, y: indices.map(i => moveR.r[i]), name: 'Right pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#29b6f6', width: 1.6 } },
-                    {
-                        x: [stimStart, stimEnd, stimEnd, stimStart], y: [0, 0, 250, 250],
-                        fill: 'toself', fillcolor: 'rgba(255,255,0,0.06)', line: { width: 0 },
-                        showlegend: false, hoverinfo: 'skip', type: 'scatter', mode: 'lines'
-                    }
+                    { x: [stimStart, stimEnd, stimEnd, stimStart], y: [0, 0, 250, 250], fill: 'toself', fillcolor: 'rgba(255,255,0,0.06)', line: { width: 0 }, showlegend: false, hoverinfo: 'skip', type: 'scatter', mode: 'lines' }
                 ], {
-                    title: { text: 'Pseudopupil Output (Both Eyes, Same Time Axis as MN)', font: { size: 11, color: '#ccc' } },
+                    title: { text: 'Right Pseudopupil Output', font: { size: 11, color: '#ccc' } },
                     xaxis: { title: 'ms', color: '#888', gridcolor: '#333', range: [0, simTime] },
                     yaxis: { title: 'Hz', color: '#888', gridcolor: '#333', rangemode: 'tozero' },
                     yaxis2: { title: 'deg', overlaying: 'y', side: 'right', color: '#26c6da', range: [0, 10] },
@@ -3404,18 +3794,46 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
                 const sampleStep = Math.max(1, Math.floor(indices.length / 520));
                 const thR = [], rR = [], thL = [], rL = [];
+                const mosThR = [], mosRR = [], mosThL = [], mosRL = [];
+                const motThR = [], motRR = [], motThL = [], motRL = [];
+                function angleDeg(x, y) {
+                    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+                }
                 for (let i = 0; i < indices.length; i += sampleStep) {
                     const j = indices[i];
                     thR.push(moveR.th[j]); rR.push(moveR.r[j]);
                     thL.push(moveL.th[j]); rL.push(moveL.r[j]);
+                    const mxR = moveR.mosX[j], myR = moveR.mosY[j];
+                    const mxL = moveL.mosX[j], myL = moveL.mosY[j];
+                    const txR = moveR.motX[j], tyR = moveR.motY[j];
+                    const txL = moveL.motX[j], tyL = moveL.motY[j];
+                    const mrR = Math.sqrt(mxR * mxR + myR * myR);
+                    const mrL = Math.sqrt(mxL * mxL + myL * myL);
+                    const trR = Math.sqrt(txR * txR + tyR * tyR);
+                    const trL = Math.sqrt(txL * txL + tyL * tyL);
+                    if (mrR > 0.03) { mosThR.push(angleDeg(mxR, myR)); mosRR.push(mrR); }
+                    if (mrL > 0.03) { mosThL.push(angleDeg(mxL, myL)); mosRL.push(mrL); }
+                    if (trR > 0.03) { motThR.push(angleDeg(txR, tyR)); motRR.push(trR); }
+                    if (trL > 0.03) { motThL.push(angleDeg(txL, tyL)); motRL.push(trL); }
                 }
+                const mosNetR = Math.max(0.9, mosVecR.r), mosNetL = Math.max(0.9, mosVecL.r);
+                const motNetR = Math.max(0.9, motVecR.r), motNetL = Math.max(0.9, motVecL.r);
+                const netR = Math.max(1.0, vecR.r), netL = Math.max(1.0, vecL.r);
                 Plotly.react('circPlotPupilPolar', [
                     { type: 'scatterpolar', subplot: 'polar', mode: 'lines+markers', theta: thR, r: rR, name: 'Right trajectory', line: { color: '#29b6f6', width: 1.6 }, marker: { color: '#29b6f6', size: 3, opacity: 0.7 } },
                     { type: 'barpolar', subplot: 'polar', theta: thR, r: rR, width: thR.map(() => 3), opacity: 0.22, marker: { color: '#29b6f6' }, name: 'Right path vectors' },
-                    { type: 'barpolar', subplot: 'polar', theta: [vecR.theta], r: [vecR.r], width: [16], opacity: 0.95, marker: { color: '#00e5ff' }, name: 'Right net direction' },
+                    { type: 'barpolar', subplot: 'polar', theta: mosThR, r: mosRR, width: mosThR.map(() => 3), opacity: 0.35, marker: { color: '#4D9221' }, name: 'MOS force (time)' },
+                    { type: 'barpolar', subplot: 'polar', theta: motThR, r: motRR, width: motThR.map(() => 3), opacity: 0.35, marker: { color: '#5E3C99' }, name: 'MOT force (time)' },
+                    { type: 'barpolar', subplot: 'polar', theta: [mosVecR.theta], r: [mosNetR], width: [14], opacity: 0.95, marker: { color: '#4D9221', line: { color: '#dcedc8', width: 1 } }, name: 'MOS force (net)' },
+                    { type: 'barpolar', subplot: 'polar', theta: [motVecR.theta], r: [motNetR], width: [14], opacity: 0.95, marker: { color: '#5E3C99', line: { color: '#ede7f6', width: 1 } }, name: 'MOT force (net)' },
+                    { type: 'barpolar', subplot: 'polar', theta: [vecR.theta], r: [netR], width: [16], opacity: 0.95, marker: { color: '#00e5ff' }, name: 'Right net direction' },
                     { type: 'scatterpolar', subplot: 'polar2', mode: 'lines+markers', theta: thL, r: rL, name: 'Left trajectory', line: { color: '#80cbc4', width: 1.6 }, marker: { color: '#80cbc4', size: 3, opacity: 0.7 } },
                     { type: 'barpolar', subplot: 'polar2', theta: thL, r: rL, width: thL.map(() => 3), opacity: 0.22, marker: { color: '#80cbc4' }, name: 'Left path vectors' },
-                    { type: 'barpolar', subplot: 'polar2', theta: [vecL.theta], r: [vecL.r], width: [16], opacity: 0.95, marker: { color: '#76ff03' }, name: 'Left net direction' }
+                    { type: 'barpolar', subplot: 'polar2', theta: mosThL, r: mosRL, width: mosThL.map(() => 3), opacity: 0.35, marker: { color: '#4D9221' }, name: 'MOS force (time)', showlegend: false },
+                    { type: 'barpolar', subplot: 'polar2', theta: motThL, r: motRL, width: motThL.map(() => 3), opacity: 0.35, marker: { color: '#5E3C99' }, name: 'MOT force (time)', showlegend: false },
+                    { type: 'barpolar', subplot: 'polar2', theta: [mosVecL.theta], r: [mosNetL], width: [14], opacity: 0.95, marker: { color: '#4D9221', line: { color: '#dcedc8', width: 1 } }, name: 'MOS force (net)', showlegend: false },
+                    { type: 'barpolar', subplot: 'polar2', theta: [motVecL.theta], r: [motNetL], width: [14], opacity: 0.95, marker: { color: '#5E3C99', line: { color: '#ede7f6', width: 1 } }, name: 'MOT force (net)', showlegend: false },
+                    { type: 'barpolar', subplot: 'polar2', theta: [vecL.theta], r: [netL], width: [16], opacity: 0.95, marker: { color: '#76ff03' }, name: 'Left net direction' }
                 ], {
                     title: { text: 'Pseudopupil Direction Vectors (Toy Model)', font: { size: 11, color: '#ccc' } },
                     paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
@@ -3452,27 +3870,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 }, { responsive: true });
             }
 
-            // ── Lazy circuit initialization: only build when user clicks Tier-1 tab ──
-            let circuitInitialized = false;
-            function initializeCircuit() {
-                if (circuitInitialized) return;
-                circuitInitialized = true;
+            // Auto-run once panel content is constructed.
+            setTimeout(() => {
                 try {
                     readParams();
                     const res = buildAndRun();
                     plotResults(res);
                 } catch(e) { console.error('Tier 1 circuit init error:', e); }
-            }
-            // Find the Tier-1 tab button and wire lazy load
-            const tier1TabBtn = document.querySelector('[data-tab="tier1"]');
-            if (tier1TabBtn) {
-                tier1TabBtn.addEventListener('click', function() {
-                    setTimeout(() => { initializeCircuit(); }, 50);
-                });
-            } else {
-                // Fallback: auto-init after delay if no tab button found
-                setTimeout(() => { initializeCircuit(); }, 80);
-            }
+            }, 80);
         }
 
         // ── Multi-Compartment (Tier 2) model ─────────────────────────

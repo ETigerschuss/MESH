@@ -123,6 +123,55 @@ Then open `comprehensive_overlap_results_YYYY-MM-DD/skeleton_em_viewer.html` in 
 - Toggle visibility per neuron (mesh, contacts, synapses, overlaps)
 - Overlap area matrix with clickable cells
 
+### Tier-1 Circuit Simulation (Experimental)
+The viewer includes an integrated **neural circuit model** for the first-layer optic flow system (VS, HS, MOT, MOS neurons):
+
+#### Model Architecture
+- **Tier-1 circuit:** VS (8 neurons) + HS (6 neurons) → MOS/MOT (4 neurons)
+- **Compartment model:** Soma + axon for VS/HS; single compartment for MOS/MOT
+- **Synaptic plasticity:** Gap junctions + graded + alpha-function chemical synapses
+- **Pseudopupil model:** Bilateral eye response tuning
+
+#### Key Features
+1. **Physiologically realistic dynamics:**
+   - Hodgkin-Huxley-like spiking mechanism for motor neurons
+   - Compartmental structure for wide-field LPTCs
+   - Baseline settling (500 ms hidden pre-roll) before stimulus
+   - Calibration tools for resting firing rates (MOT: ~120 Hz, MOS: ~100 Hz)
+
+2. **Neuron Deletion:**
+   - Select neurons to "remove" from circuit via checkboxes
+   - Deleted neurons are automatically excluded from:
+     - Synaptic transmission (both chemical and electrical)
+     - Gap junction coupling (bidirectional)
+     - Simulation output and visualization
+   - **Use case:** Understand circuit redundancy and identify essential connections
+
+3. **Interactive Calibration:**
+   - **Preset button:** Load physiologically-tuned parameters for motor neurons
+   - **Auto-calibrate:** Fit resting firing rates to user-defined targets (e.g., MOT 120 Hz)
+   - View convergence in live calibration report
+
+4. **Visual Output:**
+   - **LPTCs:** Split bilateral voltage traces (left/right eyes separate)
+   - **Motor neurons:** MOS and MOT voltage traces with stimulus overlay
+   - **Pseudopupil:** Direction vectors (polar plot) showing eye motion tuning
+   - **Force vectors:** MOS and MOT contributions rendered as time-series + net vectors
+
+#### Usage
+1. Click **"Tier 1"** tab in viewer
+2. Adjust parameters (noise, synaptic gains, intrinsic properties) or use **Preset**
+3. Toggle specific neurons off (e.g., delete HSN_L) to test their role
+4. Click **▶ Run** — simulation runs with pre-roll then stimulus
+5. View bilateral plots, direction tuning, and force contribution breakdown
+
+#### How Neuron Deletion Works
+- Disabled neurons are marked `enabled=false` in the circuit state
+- Synaptic transmission checks: `if (!cells[pre].enabled || !cells[post].enabled) skip;`
+- Gap junctions: bidirectional coupling only occurs between two `enabled` cells
+- Output recordings skipped for disabled neurons (cleaner traces)
+- Circuit matrix visualized without deleted cells
+
 ### Center Panel — 3D Scene
 - Neuron meshes + overlap face triangles (Mesh3d)
 - Contacts (red circles), synapses (yellow markers)
@@ -132,9 +181,24 @@ Then open `comprehensive_overlap_results_YYYY-MM-DD/skeleton_em_viewer.html` in 
 ### Right Panel — EM Snapshots
 - Segmentation overlay (source + target neuron colours)
 - Z-slider with per-cluster valid slices
-- Delete Slice / Delete All buttons (removes overlaps from area calculation)
-- Auto-advance to next overlap after deletion
+- **Delete Slice** — Remove false positives by deleting individual Z-slices
+  - Area is **automatically recalculated** (removes only that slice's area)
+  - Supported for both **overlap and contact** types
+  - Auto-advances to next valid slice after deletion
+- **Delete All** — Eliminate entire overlap pair (all Z-slices at once)
+  - Marks pair as eliminated in area matrix
+  - Useful for confirmed false positives
+  - Can be undone by regenerating HTML (deletions are tracked in overlaps only, not persisted)
 - Previous / Next navigation across all visible items
+- Download EM — Export current snapshot with coordinates in filename and metadata panel
+
+#### Deletion Workflow for Proofreading
+1. Open EM panel for an overlap pair
+2. Scroll through Z-slices to identify false positives (scanning artifacts, retracted branches, etc.)
+3. Click **Delete Slice** for slices that don't represent real synapses
+4. When a pair is confirmed as false positive, click **Delete All** to remove it
+5. Area matrix updates in **real-time** — total overlap area is recalculated
+6. Download audit JSON (available in viewer) to save deletion history
 
 ## Project Structure
 

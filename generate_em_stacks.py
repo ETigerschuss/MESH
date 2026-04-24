@@ -17,12 +17,59 @@ from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 from scipy.cluster.hierarchy import linkage, fcluster
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import time
 
 try:
     from cloudvolume import CloudVolume
 except ImportError:
     print("[ERROR] CloudVolume not available. Install with: pip install cloud-volume")
     exit(1)
+
+
+# ─── CloudVolume download with timeout + retry ──────────────────────
+
+_cv_pool = ThreadPoolExecutor(max_workers=1)
+
+DOWNLOAD_TIMEOUT = 60       # seconds per CloudVolume slice request
+MAX_RETRIES = 3             # retry on timeout/error
+RETRY_BACKOFF = 5           # seconds between retries (doubles each retry)
+
+
+def _cv_fetch(vol, slc):
+    """Fetch a single CloudVolume slice (runs in thread for timeout)."""
+    return vol[slc]
+
+
+def cv_download(vol, x0, x1, y0, y1, z0, z1, label=""):
+    """Download a CloudVolume cutout with timeout + retry.
+
+    Returns numpy array or raises after MAX_RETRIES failures.
+    """
+    slc = (slice(x0, x1), slice(y0, y1), slice(z0, z1))
+    backoff = RETRY_BACKOFF
+    for attempt in range(1, MAX_RETRIES + 1):
+        fut = _cv_pool.submit(_cv_fetch, vol, slc)
+        try:
+            return fut.result(timeout=DOWNLOAD_TIMEOUT)
+        except FuturesTimeoutError:
+            fut.cancel()
+            if attempt < MAX_RETRIES:
+                print(f"    [TIMEOUT] {label} attempt {attempt}/{MAX_RETRIES}, "
+                      f"retrying in {backoff}s ...")
+                time.sleep(backoff)
+                backoff *= 2
+            else:
+                raise TimeoutError(
+                    f"CloudVolume download timed out after {MAX_RETRIES} attempts: {label}")
+        except Exception as e:
+            if attempt < MAX_RETRIES:
+                print(f"    [ERROR] {label} attempt {attempt}/{MAX_RETRIES}: {e}, "
+                      f"retrying in {backoff}s ...")
+                time.sleep(backoff)
+                backoff *= 2
+            else:
+                raise
 
 
 # ─── Configuration ────────────────────────────────────────────────────
@@ -86,10 +133,13 @@ def create_segmented_snapshot(em_vol, seg_vol, center_nm,
     seg_z  = int(seg_center_vox[2]) + z_offset_slices
 
     try:
-        em_data = em_vol[em_x0:em_x1, em_y0:em_y1, em_z:em_z+1]
+        label = f"{source_name}->{target_name} z={em_z}"
+        em_data = cv_download(em_vol, em_x0, em_x1, em_y0, em_y1, em_z, em_z+1,
+                              label=f"EM {label}")
         em_slice = em_data[:, :, 0, 0]
 
-        seg_data = seg_vol[seg_x0:seg_x1, seg_y0:seg_y1, seg_z:seg_z+1]
+        seg_data = cv_download(seg_vol, seg_x0, seg_x1, seg_y0, seg_y1, seg_z, seg_z+1,
+                               label=f"SEG {label}")
         seg_slice = seg_data[:, :, 0, 0]
 
         em_rgb = np.stack([em_slice, em_slice, em_slice], axis=-1)
@@ -277,13 +327,29 @@ def main():
         print(f"  Will generate up to {total_overlap_imgs} overlap images "
               f"({len(plan)} sub-clusters)")
 
-        # Remove old overlap images (indices changed due to clustering)
+        # Compute which overlap indices are in the current plan
+        plan_idxs = set(p['idx'] for p in plan)
+        # Only remove orphaned overlap images whose idx is NOT in the current plan
+        # This allows resuming after a crash without re-downloading everything
         old_ov_files = [f for f in os.listdir(em_snap_dir)
                         if f.startswith('overlap_')]
-        if old_ov_files:
-            print(f"  Removing {len(old_ov_files)} old overlap images ...")
-            for f in old_ov_files:
+        orphaned = []
+        for f in old_ov_files:
+            try:
+                file_idx = int(f.split('_')[1])
+                if file_idx not in plan_idxs:
+                    orphaned.append(f)
+            except (ValueError, IndexError):
+                orphaned.append(f)  # malformed filename
+        if orphaned:
+            print(f"  Removing {len(orphaned)} orphaned overlap images "
+                  f"(keeping {len(old_ov_files) - len(orphaned)} valid) ...")
+            for f in orphaned:
                 os.remove(os.path.join(em_snap_dir, f))
+        else:
+            existing = len(old_ov_files)
+            if existing:
+                print(f"  Found {existing} existing overlap images — will skip those")
 
         print("\n[3/6] Downloading overlap EM snapshots ...")
         overlap_ok = 0
@@ -472,11 +538,11 @@ def main():
             print("  [SKIP] Cannot find source/target columns")
             return
 
-        # Filter for MOT/MOS involved synapses
+        # Include all synapses (all neuron groups)
         name2id = {v: k for k, v in neuron_ids.items()}
-        mot_mos = ['MOT_L', 'MOT_R', 'MOS_L', 'MOS_R']
-        sdf = sdf[sdf['source'].isin(mot_mos) | sdf['target'].isin(mot_mos)]
-        print(f"  Found {len(sdf)} MOT/MOS synapses")
+        valid_names = set(name2id.keys())
+        sdf = sdf[sdf['source'].isin(valid_names) & sdf['target'].isin(valid_names)]
+        print(f"  Found {len(sdf)} synapses for EM stacks")
 
         s_new = s_skip = 0
         for orig_idx, row in tqdm(sdf.iterrows(), total=len(sdf), desc="Synapses"):

@@ -56,6 +56,53 @@ SCRIPTS = [
 ]
 
 
+def _find_latest_results():
+    """Find the latest comprehensive_overlap_results_* directory."""
+    candidates = [d for d in os.listdir(SCRIPT_DIR)
+                  if os.path.isdir(os.path.join(SCRIPT_DIR, d))
+                  and d.startswith('comprehensive_overlap_results_')]
+    if candidates:
+        return os.path.join(SCRIPT_DIR, sorted(candidates)[-1])
+    return None
+
+
+def _can_skip_overlap_analysis():
+    """Check if overlap_analysis.py can be skipped (key outputs exist)."""
+    rd = _find_latest_results()
+    if not rd:
+        return False, "no results directory"
+    # Check key output files
+    faces = os.path.join(rd, 'geometric_data', 'contact_faces.csv')
+    combined = os.path.join(rd, 'all_results_combined.csv')
+    meshes = os.path.join(rd, 'neuron_meshes')
+    if not os.path.exists(faces):
+        return False, "missing contact_faces.csv"
+    if not os.path.exists(combined):
+        return False, "missing all_results_combined.csv"
+    if not os.path.isdir(meshes) or len(os.listdir(meshes)) == 0:
+        return False, "missing neuron meshes"
+    # Count neurons in config
+    nf = os.path.join(SCRIPT_DIR, 'neurons.json')
+    with open(nf) as f:
+        cfg = json.load(f)
+    expected = len(cfg.get('viewer_neurons', cfg.get('neurons', {})))
+    n_meshes = len([f for f in os.listdir(meshes) if f.endswith('.obj')])
+    if n_meshes < expected:
+        return False, f"only {n_meshes}/{expected} meshes"
+    return True, rd
+
+
+def _can_skip_skeleton_plots():
+    """Check if skeleton plot dir exists."""
+    rd = _find_latest_results()
+    if not rd:
+        return False, "no results directory"
+    plots = os.path.join(rd, 'overlap_plots_skeleton')
+    if os.path.isdir(plots) and len(os.listdir(plots)) > 0:
+        return True, rd
+    return False, "missing skeleton plots"
+
+
 def main():
     start_all = time.time()
     print("=" * 72)
@@ -71,6 +118,26 @@ def main():
         if not os.path.isfile(script_path):
             print(f"\n[{i}/{len(SCRIPTS)}] SKIP {script} — file not found")
             results.append((script, "SKIP"))
+            continue
+
+        # Smart skip: avoid re-running expensive steps if outputs exist
+        skip = False
+        if script == "overlap_analysis.py":
+            can_skip, info = _can_skip_overlap_analysis()
+            if can_skip:
+                print(f"\n[{i}/{len(SCRIPTS)}] SKIP {script} — outputs already exist in {os.path.basename(info)}")
+                print(f"         (contact_faces.csv, all_results_combined.csv, all meshes present)")
+                print(f"         Delete the results dir to force re-run.")
+                results.append((script, "SKIP (cached)"))
+                skip = True
+        elif script == "generate_skeleton_plots.py":
+            can_skip, info = _can_skip_skeleton_plots()
+            if can_skip:
+                print(f"\n[{i}/{len(SCRIPTS)}] SKIP {script} — skeleton plots already exist")
+                results.append((script, "SKIP (cached)"))
+                skip = True
+
+        if skip:
             continue
 
         print(f"\n{'─' * 72}")
