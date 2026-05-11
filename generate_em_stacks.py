@@ -1,4 +1,63 @@
 """
+generate_em_stacks.py — Step 3 of the MESH pipeline
+====================================================
+Downloads EM snapshots with coloured segmentation overlays and organises them
+for the interactive HTML viewer.
+
+WHAT IT DOES
+------------
+1. **Overlap faces → spatial clustering**
+   Reads ``geometric_data/contact_faces.csv`` and, for each neuron pair, clusters
+   all overlapping faces using Ward hierarchical linkage (``scipy.cluster.hierarchy``).
+   Faces > 10 µm apart (``CLUSTER_THRESHOLD_NM = 10000`` nm) start separate clusters.
+   Each cluster becomes a separate "overlap entry" in the viewer with its own index,
+   centroid, Z-range, and EM image series.
+
+2. **EM snapshot download (CloudVolume)**
+   For each overlap cluster, contact patch, and synapse:
+   - Determines a 512×512 pixel crop (4,096×4,096 nm at 8 nm/px) centred on the
+     cluster centroid.
+   - Downloads the raw EM tile and the segmentation tile.
+   - For each Z-slice (±20 slices, 40 nm/slice, = ±800 nm depth range), renders an
+     overlay image: EM greyscale with source neuron (transparent color) and target
+     neuron (transparent color) segmentation overlaid.
+   - Saves as ``em_snaps/<kind>_<idx>_z±NNN.png``.
+
+3. **Metadata output**
+   Writes ``overlap_em_meta.json`` — a lookup table consumed by
+   ``skeleton_em_viewer.py`` to populate the right-panel EM viewer and the Z-slider.
+   Fields per entry: idx, source, target, x/y/z (centroid nm), z_lo/z_hi (slider
+   range), valid_z (list of downloaded Z offsets), slice_coords (per-slice XY),
+   area_um2, orig_n_slices.
+
+CLUSTERING RATIONALE
+--------------------
+The 10 µm threshold separates distinct anatomical contact regions (e.g., axon
+terminals vs. passing branches) so each region can be inspected independently in
+the EM viewer. Within a cluster, individual Z-slices can be deleted during
+proofreading without affecting other clusters of the same pair.
+
+TIMEOUT & RETRY LOGIC
+---------------------
+CloudVolume downloads are wrapped in a ``ThreadPoolExecutor`` with a 60 s timeout
+(``DOWNLOAD_TIMEOUT``). On failure, up to 3 retries with exponential back-off
+(5 s → 10 s → 20 s) are attempted. This prevents the pipeline from hanging on
+network glitches (which previously caused process termination when the Fortran
+console window was closed).
+
+CACHING
+-------
+Images already present in ``em_snaps/`` are skipped. Orphaned image files (for
+pairs no longer in the analysis) are detected and optionally removed. Re-running
+the script only downloads missing snapshots.
+
+REQUIREMENTS
+------------
+cloud-volume, Pillow, scipy, pandas, numpy, tqdm
+FlyWire CAVE token (env var ``FLYWIRE_TOKEN`` or ``~/.cloudvolume/secrets/cave-secret.json``)
+"""
+
+"""
 Generate ALL EM snapshots with segmentation overlays
 ====================================================
 - Overlap faces  → spatially clustered (each cluster = separate overlap idx)

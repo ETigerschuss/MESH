@@ -17,10 +17,12 @@ KEY FEATURES
 
 2. **2D EM Snapshots:**
    - Segmentation overlays (colored by neurons)
+     - Browser-side contrast adjustment for easier membrane tracing
    - Z-stack navigation (±20 slices)
    - **DELETION:** Remove false positives by deleting individual Z-slices
-     → Area is automatically recalculated from remaining slices
-   - **EXPORT:** Download snapshots with coordinates in filename & metadata
+         → Area is automatically recalculated from remaining slices by proportional rescaling of each cluster's original area
+     - **EXPORT:** Download snapshots with coordinates in filename & metadata
+         → Current export metadata still needs one cleanup pass to guarantee FlyWire-global coordinate wording everywhere
 
 3. **Overlap Area Proofreading:**
    - Interactive overlap matrix (clickable cells)
@@ -32,10 +34,20 @@ KEY FEATURES
    - Hodgkin-Huxley-like spiking model for MOT/MOS motor neurons
    - Compartmental LPTCs (VS/HS wide-field neurons)
    - Gap junctions + chemical synapses
+    - Editable intrinsic, synaptic, and coupling parameters from the browser UI
    - **NEURON DELETION:** Test circuit robustness by removing individual neurons
      → Deleted neurons automatically excluded from synaptic transmission & coupling
    - Bilateral pseudopupil output (eye motion tuning)
    - Auto-calibration for resting firing rates
+
+SCIENTIFIC PROVENANCE
+---------------------
+Dataset provenance follows the FlyWire reconstruction on FAFB v141. The chemical
+synapse table is read from FlyWire/CAVE via ``fafbseg.flywire.synapses``. The
+Tier 1 conductance equations are based on Hodgkin-Huxley-style membrane dynamics,
+but the numeric defaults in this repository are a hybrid of literature-inspired
+values and project-specific fitting / auto-calibration, not a one-to-one copy of
+a single published parameter table.
 
 STANDALONE USAGE
 ----------------
@@ -231,17 +243,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
         .modal-overlay.active { display: flex; }
         .modal-content {
-            background: #2a2a2a; border: 1px solid #555;
+            background: #ffffff; border: 1px solid #cfcfcf;
             border-radius: 8px; max-width: 90vw; max-height: 85vh;
             overflow: auto; padding: 16px; position: relative;
+            color: #222;
         }
-        .modal-content h3 { color: #FFD400; margin: 0 0 12px 0; }
+        .modal-content h3 { color: #1f1f1f; margin: 0 0 12px 0; }
         .modal-close {
             position: absolute; top: 8px; right: 12px;
-            background: none; border: none; color: #aaa;
+            background: none; border: none; color: #666;
             font-size: 22px; cursor: pointer;
         }
-        .modal-close:hover { color: #fff; }
+        .modal-close:hover { color: #111; }
 
         /* ── Right EM panel ────────────────────────── */
         .em-panel {
@@ -307,28 +320,28 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         #btnRemoveGJ:hover { background: #6B0000; }
 
         /* ── Modal tab bar ─────────────────────── */
-        .modal-tabs { display: flex; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #555; }
+        .modal-tabs { display: flex; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #d0d0d0; }
         .modal-tab {
-            padding: 6px 16px; cursor: pointer; background: #333; color: #aaa;
-            border: 1px solid #555; border-bottom: none; border-radius: 6px 6px 0 0;
+            padding: 6px 16px; cursor: pointer; background: #f3f3f3; color: #555;
+            border: 1px solid #d0d0d0; border-bottom: none; border-radius: 6px 6px 0 0;
             font-size: 12px; font-weight: bold;
         }
-        .modal-tab:hover { background: #444; color: #fff; }
-        .modal-tab.active { background: #2a2a2a; color: #FFD400; border-bottom: 2px solid #2a2a2a; margin-bottom: -2px; }
+        .modal-tab:hover { background: #e9e9e9; color: #222; }
+        .modal-tab.active { background: #ffffff; color: #111; border-bottom: 2px solid #ffffff; margin-bottom: -2px; }
         .modal-tab-content { display: none; }
         .modal-tab-content.active { display: block; }
         .gj-table { border-collapse: collapse; font-size: 11px; width: 100%; }
-        .gj-table th { background: #333; color: #FFD400; padding: 4px 8px; border: 1px solid #444; text-align: left; font-size: 10px; }
-        .gj-table td { padding: 4px 8px; border: 1px solid #333; font-size: 10px; color: #ccc; }
-        .gj-table tr:hover { background: #333; }
+        .gj-table th { background: #f0f0f0; color: #222; padding: 4px 8px; border: 1px solid #d0d0d0; text-align: left; font-size: 10px; }
+        .gj-table td { padding: 4px 8px; border: 1px solid #d0d0d0; font-size: 10px; color: #222; }
+        .gj-table tr:hover { background: #f8f8f8; }
         .gj-table .gj-delete { cursor: pointer; color: #B00; }
         .gj-table .gj-delete:hover { color: #F44; }
 
         /* ── Heatmap matrix ─────────────────────── */
         .heatmap-container {
             max-height: 350px; min-height: 120px;
-            overflow: auto; background: #1a1a1a;
-            border-top: 2px solid #444;
+            overflow: auto; background: #ffffff;
+            border-top: 2px solid #d0d0d0;
             padding: 8px;
         }
         .heatmap-container table {
@@ -336,29 +349,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             font-size: 11px;
         }
         .heatmap-container th {
-            background: #333; color: #FFD400;
+            background: #f0f0f0; color: #222;
             padding: 3px 6px; text-align: center;
-            border: 1px solid #444;
+            border: 1px solid #d0d0d0;
             position: sticky; top: 0; z-index: 2;
             font-size: 10px;
         }
         .heatmap-container th.row-header {
             position: sticky; left: 0; z-index: 3;
-            background: #333;
+            background: #f0f0f0;
         }
         .heatmap-container th.corner {
             position: sticky; left: 0; top: 0; z-index: 4;
-            background: #333;
+            background: #f0f0f0;
         }
         .heatmap-container td {
             padding: 2px 4px; text-align: center;
-            border: 1px solid #333; cursor: pointer;
+            border: 1px solid #d0d0d0; cursor: pointer;
             font-size: 10px; font-family: monospace;
             min-width: 46px;
         }
-        .heatmap-container td:hover { outline: 2px solid #FFD400; }
-        .heatmap-container td.diagonal { background: #1a1a1a; cursor: default; }
-        .heatmap-container td.no-data { color: #555; }
+        .heatmap-container td:hover { outline: 2px solid #1976d2; }
+        .heatmap-container td.diagonal { background: #f7f7f7; cursor: default; }
+        .heatmap-container td.no-data { color: #9a9a9a; }
     </style>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -441,37 +454,37 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 <div style="display:flex;flex-direction:column;gap:10px;">
                     <div>
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                            <b style="color:#FFD400;font-size:11px;">Full Matrix (all 22 neurons)</b>
+                            <b style="color:#222;font-size:11px;">Full Matrix (all 22 neurons)</b>
                             <input type="range" id="heatSliderFull" min="0.1" max="100" value="100" step="0.1"
                                    style="width:140px;" title="Adjust max heat intensity">
-                            <span id="heatSliderFullVal" style="color:#aaa;font-size:10px;min-width:60px;">max: 100%</span>
+                            <span id="heatSliderFullVal" style="color:#555;font-size:10px;min-width:60px;">max: 100%</span>
                         </div>
                         <div class="heatmap-container" id="heatmapContainer"></div>
                     </div>
                     <div>
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                            <b style="color:#FFD400;font-size:11px;">L/R Pair Mean</b>
+                            <b style="color:#222;font-size:11px;">L/R Pair Mean</b>
                             <input type="range" id="heatSliderPair" min="0.1" max="100" value="100" step="0.1"
                                    style="width:140px;" title="Adjust max heat intensity">
-                            <span id="heatSliderPairVal" style="color:#aaa;font-size:10px;min-width:60px;">max: 100%</span>
+                            <span id="heatSliderPairVal" style="color:#555;font-size:10px;min-width:60px;">max: 100%</span>
                         </div>
                         <div class="heatmap-container" id="heatmapPairContainer"></div>
                     </div>
                     <div>
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                            <b style="color:#FFD400;font-size:11px;">Group Mean (L+R collapsed)</b>
+                            <b style="color:#222;font-size:11px;">Group Mean (L+R collapsed)</b>
                             <input type="range" id="heatSliderGroup" min="0.1" max="100" value="100" step="0.1"
                                    style="width:140px;" title="Adjust max heat intensity">
-                            <span id="heatSliderGroupVal" style="color:#aaa;font-size:10px;min-width:60px;">max: 100%</span>
+                            <span id="heatSliderGroupVal" style="color:#555;font-size:10px;min-width:60px;">max: 100%</span>
                         </div>
                         <div class="heatmap-container" id="heatmapGroupContainer"></div>
                     </div>
                     <div>
                         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                            <b style="color:#FFD400;font-size:11px;">MOS / MOT Bidirectional Mean</b>
+                            <b style="color:#222;font-size:11px;">MOS / MOT Bidirectional Mean</b>
                             <input type="range" id="heatSliderBidir" min="0.1" max="100" value="100" step="0.1"
                                    style="width:140px;" title="Adjust max heat intensity">
-                            <span id="heatSliderBidirVal" style="color:#aaa;font-size:10px;min-width:60px;">max: 100%</span>
+                            <span id="heatSliderBidirVal" style="color:#555;font-size:10px;min-width:60px;">max: 100%</span>
                         </div>
                         <div class="heatmap-container" id="heatmapBidirContainer"></div>
                     </div>
@@ -2359,107 +2372,382 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         // ── Tier 1 Circuit Model ────────────────────────────────────
         let circuitInitialized = false;
+        // ═══════════════════════════════════════════════════════════════════════════
+        // TIER 1 BIOPHYSICAL CIRCUIT MODEL — FULL DOCUMENTATION
+        // ═══════════════════════════════════════════════════════════════════════════
+        //
+        // OVERVIEW
+        // --------
+        // A single-compartment conductance-based circuit model of the first-order
+        // visual motion pathway in Drosophila, focusing on the LPTC (Lobula Plate
+        // Tangential Cell) → motor neuron (MN) circuit.
+        //
+        // The model contains 22 neurons (left + right):
+        //   • VS1-VS4  (×2 sides = 8):  Vertical System LPTCs, wide-field optic flow detectors
+        //   • HSN, HSE, HSS (×2 = 6):   Horizontal System LPTCs, horizontal optic flow
+        //   • MOS_L/R  (2):              Neck motor neurons for orbit/smooth eye movements
+        //   • MOT_L/R  (2):              Neck motor neurons for compensatory head/eye rotation
+        //   • BIPS_L/R (2):              Bistratified inhibitory neurons (GABAergic, project onto HS)
+        //   • H2_L/R   (2):              H2 horizontal motion detectors (currently passive)
+        //
+        // CELL TYPES
+        // ----------
+        // LPTC (VS, HS):
+        //   - Graded (non-spiking) neurons. Wide-field optic flow sensors.
+        //   - Respond to retinal slip with slow, sustained depolarisation.
+        //   - Model: leak + delayed-rectifier K⁺ + T-type Ca²⁺ (optional)
+        //   - Resting potential set by VL (leak reversal); Rin sets gain.
+        //   - VS cells are electrically coupled in a chain (VS1↔VS2↔VS3↔VS4)
+        //     via gap junctions, enabling spatial integration along the dorso-ventral axis.
+        //   - HS cells (HSN↔HSE↔HSS) similarly coupled.
+        //
+        // MN (MOT, MOS):
+        //   - Spiking (Hodgkin-Huxley) neurons. Motor command neurons.
+        //   - Fire tonically at rest (MOT: ~120 Hz, MOS: ~100 Hz).
+        //   - Primary driver of spontaneous firing: persistent Na⁺ (gNaP).
+        //     Higher gNaP → higher tonic rate → stronger motor output at rest.
+        //   - Receive inputs from LPTCs via (a) gap junctions (LPTC axon ↔ MN dendrite)
+        //     and (b) graded chemical synapses.
+        //   - VS→MOS and HS→MOS/MOT gap junctions (bidirectional).
+        //     NOTE: VS does NOT electrically couple to MOT; only HS→MOT.
+        //   - MN↔MN chemical synapses (MOT_L→MOS_L: excitatory, 3 contacts each).
+        //
+        // BIOPHYSICAL PARAMETERS
+        // ----------------------
+        // Shared constants (physiological):
+        //   Cm  = 1.0 nF     membrane capacitance (whole-cell patch, Drosophila MN scale)
+        //   V_Na = +50 mV    Na⁺ reversal potential
+        //   V_K  = -77 mV    K⁺ reversal potential
+        //   VCa  = +120 mV   Ca²⁺ reversal potential (T-type, low-threshold)
+        //   dt   = 0.01 ms   integration step (forward Euler, stable for HH at this dt)
+        //
+        // Calibrated MN defaults (from auto-calibration against patch-clamp targets):
+        //   MOT: VL=-58.81 mV, gNaP=1.748 nS, gK=52.68 nS, Ibias=2.84 nA
+        //   MOS: VL=-62.76 mV, gNaP=1.510 nS, gK=45.60 nS, Ibias=2.10 nA
+        //   gNa=145/170 nS, gL=0.42/0.28 nS, Rin=260/360 MΩ for MOT/MOS respectively
+        //
+        // INTEGRATION METHOD
+        // ------------------
+        // Forward Euler (explicit), dt = 0.01 ms.
+        // Each time step:
+        //   1. Compute gap junction currents (bidirectional, LP-filtered)
+        //   2. Compute graded or alpha-function chemical synapse currents
+        //   3. Add external stimulus + tonic Ibias + white noise
+        //   4. Step each cell's gating variables (m, h, n) with explicit Euler
+        //   5. Update membrane voltage: V += (Itot - I_channels) / Cm * dt
+        //
+        // A 500 ms "pre-roll" (simPreRollMs) runs before t=0 so the circuit settles
+        // to its steady firing rate before the stimulus is applied.
+        // ═══════════════════════════════════════════════════════════════════════════
+
         function renderCircuitModel() {
             if (circuitInitialized) return;
             circuitInitialized = true;
 
-            const dt = 0.01;  // ms (match user's code)
-            const Cm = 1.0;
+            const dt = 0.01;  // Integration step (ms). Forward Euler is stable for HH at dt ≤ 0.025 ms.
+            const Cm = 1.0;   // Whole-cell membrane capacitance (nF). Shared by all cell types.
+            // Ionic reversal potentials (mV), based on Drosophila ionic concentrations.
             const VCa = 120, V_Na = 50, V_K = -77;
 
-            // ── Gate kinetics ──
+            // ═════════════════════════════════════════════════════════════════════
+            // HODGKIN-HUXLEY GATE KINETICS  (Hodgkin & Huxley, 1952)
+            // ═════════════════════════════════════════════════════════════════════
+            // The three gating variables control ion channel conductances:
+            //
+            //   m(t) : Na⁺ activation gate        — fast, activates at depolarisation
+            //   h(t) : Na⁺ inactivation gate       — slow, inactivates after activation
+            //   n(t) : K⁺ (delayed-rectifier) gate — repolarises the action potential
+            //
+            // Each gate follows: dx/dt = αx(V)·(1−x) − βx(V)·x
+            // Steady state: x∞(V) = α / (α + β)     [computed by ss()]
+            // Time constant: τx(V) = 1 / (α + β)
+            //
+            // Na⁺ channel: I_Na = gNa · m³ · h · (V − V_Na)
+            //   m³ factor: cubic activation reflects 3 independent activation subunits
+            //   h factor:  inactivation — Na⁺ channel closes after ~1 ms; critical for spike
+            //
+            // K⁺ channel: I_K = gK · n⁴ · (V − V_K)
+            //   n⁴ factor: four activation subunits in series (delayed-rectifier Kv)
+
+            // αm: Na⁺ activation opening rate. L'Hôpital rule at V=-40 prevents 0/0.
             function alphaM(V) { const x = V+40; return Math.abs(x)<1e-7 ? 1 : 0.1*x/(1-Math.exp(-x/10)); }
+            // βm: Na⁺ activation closing rate.
             function betaM(V)  { return 4*Math.exp(-(V+65)/18); }
+            // αh: Na⁺ inactivation opening rate (slow exponential).
             function alphaH(V) { return 0.07*Math.exp(-(V+65)/20); }
+            // βh: Na⁺ inactivation closing rate (sigmoidal, closes at plateau).
             function betaH(V)  { return 1/(1+Math.exp(-(V+35)/10)); }
+            // αn: K⁺ activation opening rate. L'Hôpital rule at V=-55.
             function alphaN(V) { const x = V+55; return Math.abs(x)<1e-7 ? 0.1 : 0.01*x/(1-Math.exp(-x/10)); }
+            // βn: K⁺ activation closing rate.
             function betaN(V)  { return 0.125*Math.exp(-(V+65)/80); }
+            // ss(): steady-state gate value x∞(V) = α/(α+β). Used at initialisation.
             function ss(af,bf,V) { const a=af(V),b=bf(V); return a/(a+b); }
+
+            // ═════════════════════════════════════════════════════════════════════
+            // T-TYPE Ca²⁺ CHANNEL  (low-voltage activated, LVA)
+            // ═════════════════════════════════════════════════════════════════════
+            // Present in both LPTCs and (optionally) MNs. Primarily relevant for
+            // dendritic integration in VS/HS; in MNs keep gVT=0 to avoid
+            // burst-then-silence artefacts from Ca²⁺-mediated K⁺ currents.
+            //
+            // I_T = gVT · m∞_Ca(V)³ · h_Ca(t) · (V − VCa)
+            //
+            // m∞_Ca: instantaneous activation (fast, no state variable needed)
+            //   Half-activation at V½ = -61 mV, slope k = 4.2 mV
+            // h_Ca: slow inactivation (tracks h∞_Ca with time constant tauHCa(V))
+            //   Half-inactivation at V½ = -85.5 mV (deeply hyperpolarised → de-inactivated)
+            //   tauHCa(V): voltage-dependent time constant, slow (40–70 ms range)
+
+            // m∞_Ca: T-Ca²⁺ steady-state activation. Boltzmann sigmoid.
             function mInfCa(V)  { return 1/(1+Math.exp((-61-V)/4.2)); }
+            // h∞_Ca: T-Ca²⁺ steady-state inactivation. Deeply negative V→ fully de-inactivated.
             function hInfCa(V)  { return 1/(1+Math.exp((V+85.5)/8.6)); }
+            // τh_Ca(V): voltage-dependent inactivation time constant (ms). Peak ~70 ms near -84 mV.
             function tauHCa(V)  { return 40+30/(1+Math.exp((V+84)/7.3))*Math.exp((V+160)/30); }
+
+            // ═════════════════════════════════════════════════════════════════════
+            // PERSISTENT Na⁺ (NaP) — PRIMARY DRIVER OF TONIC SPIKING IN MNs
+            // ═════════════════════════════════════════════════════════════════════
+            // I_NaP = gNaP · m∞_NaP(V) · (V − V_Na)
+            //
+            // NaP does not inactivate (persistent). It activates at sub-threshold
+            // potentials (~−55 to −45 mV), providing a depolarising current that
+            // sustains tonic firing without a falling transient Na⁺ current.
+            //
+            // Tuning gNaP is the primary lever for setting tonic firing rate:
+            //   • Increase gNaP → higher spontaneous rate (more depolarising drive)
+            //   • Decrease gNaP → lower rate or even tonic silence
+            // This is why MOS vs MOT can be tuned to different baseline rates:
+            //   MOS typically has slightly lower gNaP than MOT in the calibrated preset.
+            //
+            // m∞_NaP: half-activation at −52 mV, slope 5 mV (steep, near-threshold).
             function mNaPinf(V) { return 1/(1+Math.exp(-(V+52)/5)); }
 
-            // ── LPTC cell (graded, non-spiking) ──
+            // ═════════════════════════════════════════════════════════════════════
+            // LPTC CELL MODEL  (graded, non-spiking: VS1-VS4, HSN, HSE, HSS)
+            // ═════════════════════════════════════════════════════════════════════
+            // Single-compartment conductance model. No Na⁺ spike; responds to synaptic
+            // inputs with slow, graded voltage changes that are transmitted to MNs.
+            //
+            // Membrane equation:
+            //   Cm · dV/dt = −I_T − I_K − I_L + I_input
+            //
+            //   I_T = gVT · m∞_Ca³ · h_Ca · (V − VCa)    [T-type Ca²⁺, optional]
+            //   I_K = gK  · n⁴      · (V − V_K)            [delayed-rectifier K⁺]
+            //   I_L = (gL + 1/Rin) · (V − VL)              [leak + resting conductance]
+            //
+            // The 1/Rin term in I_L represents the standing membrane conductance that
+            // fixes the resting potential at VL when no input is present.
+            // Larger Rin → higher voltage gain per unit input current.
+            //
+            // VS cell diversity: VS1-VS4 differ in VL and Rin by a user-set per-cell step.
+            //   VS1: VL = Vr1, Rin = Rin1
+            //   VS2: VL = Vr1 + ΔVrStep, Rin = Rin1 + ΔRinStep   (typically more hyperpolarised)
+            //   VS3: VL = Vr1 + 2·ΔVrStep, etc.
+            // This gradient creates different gain/offset profiles matching the known
+            // visual tuning gradient along the VS1–VS4 array.
+            //
+            // State variables: V (membrane potential), hCa (T-Ca inactivation), n (K⁺ activation)
+            // All other gate variables (mNa, hNa) are stored but not used in stepLPTC.
+
+            // Create a new LPTC cell object with all state variables at steady state.
             function createLPTC(name, Rin, VL, gVT, gL, gK) {
                 return {
                     name, type: 'LPTC',
-                    V: VL, gVT, gL, Rin, gK, VL,
-                    hCa: hInfCa(VL),
-                    mNa: ss(alphaM,betaM,VL), hNa: ss(alphaH,betaH,VL),
-                    n: ss(alphaN,betaN,VL),
+                    V: VL,          // Start at rest (leak reversal)
+                    gVT, gL, Rin, gK, VL,
+                    hCa: hInfCa(VL),                    // T-Ca inactivation at resting V
+                    mNa: ss(alphaM,betaM,VL),            // (unused in LPTC step, stored for completeness)
+                    hNa: ss(alphaH,betaH,VL),
+                    n:   ss(alphaN,betaN,VL),            // K⁺ gate at resting V
                 };
             }
+            // Advance LPTC one time step (forward Euler).
             function stepLPTC(c, Itot) {
                 const v = c.V;
+                // T-type Ca²⁺ inactivation: slow approach to h∞_Ca with τh_Ca(v)
                 c.hCa += (hInfCa(v)-c.hCa)/tauHCa(v)*dt;
+                // T-Ca²⁺ current (inward, depolarising if V < VCa = +120 mV)
                 const iT = c.gVT * Math.pow(mInfCa(v),3) * c.hCa * (v-VCa);
+                // K⁺ delayed rectifier gate update
                 c.n += (alphaN(v)*(1-c.n)-betaN(v)*c.n)*dt;
+                // K⁺ current (outward, repolarising)
                 const iK = c.gK * Math.pow(c.n,4) * (v-V_K);
+                // Leak + standing conductance (holds V near VL at rest)
                 const iL = (c.gL + 1/c.Rin) * (v - c.VL);
+                // Membrane voltage update: Cm·dV/dt = −iT − iK − iL + Itot
                 c.V = v + (-iT - iK - iL + Itot)/Cm*dt;
                 return c.V;
             }
 
-            // ── MN cell (HH spiking) ──
+            // ═════════════════════════════════════════════════════════════════════
+            // MN CELL MODEL  (Hodgkin-Huxley spiking: MOT, MOS)
+            // ═════════════════════════════════════════════════════════════════════
+            // Full Hodgkin-Huxley model extended with persistent Na⁺ (NaP) and
+            // optional T-type Ca²⁺. Fires action potentials tonically at rest.
+            //
+            // Membrane equation:
+            //   Cm · dV/dt = −I_T − I_Na − I_K − I_NaP − I_L + I_input
+            //
+            //   I_Na  = gNa  · m³ · h       · (V − V_Na)   [transient Na⁺, spike upstroke]
+            //   I_K   = gK   · n⁴            · (V − V_K)    [delayed rectifier K⁺, repolarisation]
+            //   I_NaP = gNaP · m∞_NaP(V)    · (V − V_Na)   [persistent Na⁺, tonic firing driver]
+            //   I_T   = gVT  · m∞_Ca³ · h_Ca · (V − VCa)   [T-Ca²⁺, keep gVT=0 to avoid bursting]
+            //   I_L   = (gL + 1/Rin)         · (V − VL)     [leak]
+            //
+            // Tonic firing mechanism:
+            //   At rest (V ~ -60 to -55 mV), I_NaP provides sustained inward current
+            //   that slowly depolarises the cell until the Na⁺ spike threshold (~-40 mV)
+            //   is reached. After each spike, K⁺ repolarisation resets V, and the cycle
+            //   repeats. The inter-spike interval (ISI) is primarily set by:
+            //     1. gNaP  (more NaP → shorter ISI → higher rate)
+            //     2. VL    (more depolarised VL → shorter ISI)
+            //     3. Ibias (additional tonic bias current)
+            //     4. gK    (stronger K⁺ repolarisation → longer AHP → lower rate)
+            //
+            // Auto-calibration targets:  MOT ~ 120 Hz,  MOS ~ 100 Hz
+            // The 'Auto-Calibrate' button adjusts gNaP (primary) then Ibias (secondary)
+            // to hit these targets via a fast bisection search over the pre-roll window.
+            //
+            // State variables: V, hCa, mNa (Na⁺ m), hNa (Na⁺ h), n (K⁺)
+
+            // Create a new MN cell object initialised to steady state.
             function createMN(name, Rin, VL, gVT, gL, gNa, gK, gNaP) {
                 return {
                     name, type: 'MN',
-                    V: VL, gVT, gL, Rin, gNa, gK, VL, gNaP,
-                    hCa: hInfCa(VL),
-                    mNa: ss(alphaM,betaM,VL), hNa: ss(alphaH,betaH,VL),
-                    n: ss(alphaN,betaN,VL),
+                    V: VL,          // Start at resting potential
+                    gVT, gL, Rin, gNa, gK, VL, gNaP,
+                    hCa: hInfCa(VL),                    // T-Ca inactivation at rest
+                    mNa: ss(alphaM,betaM,VL),            // Na⁺ activation gate at rest
+                    hNa: ss(alphaH,betaH,VL),            // Na⁺ inactivation gate at rest
+                    n:   ss(alphaN,betaN,VL),            // K⁺ gate at rest
                 };
             }
+            // Advance MN one time step (forward Euler).
             function stepMN(c, Itot) {
                 const v = c.V;
+                // T-type Ca²⁺ inactivation (optional; gVT=0 by default for MNs)
                 c.hCa += (hInfCa(v)-c.hCa)/tauHCa(v)*dt;
                 const iT = c.gVT * Math.pow(mInfCa(v),3) * c.hCa * (v-VCa);
-                c.mNa += (alphaM(v)*(1-c.mNa)-betaM(v)*c.mNa)*dt;
-                c.hNa += (alphaH(v)*(1-c.hNa)-betaH(v)*c.hNa)*dt;
-                c.n   += (alphaN(v)*(1-c.n)  -betaN(v)*c.n  )*dt;
-                const iNa  = c.gNa  * Math.pow(c.mNa,3)*c.hNa * (v-V_Na);
-                const iK   = c.gK   * Math.pow(c.n,4)          * (v-V_K);
-                const iNaP = c.gNaP * mNaPinf(v)                * (v-V_Na);
-                const iL   = (c.gL + 1/c.Rin) * (v - c.VL);
+                // Transient Na⁺ gating variables (HH kinetics)
+                c.mNa += (alphaM(v)*(1-c.mNa)-betaM(v)*c.mNa)*dt;  // fast activation
+                c.hNa += (alphaH(v)*(1-c.hNa)-betaH(v)*c.hNa)*dt;  // slow inactivation
+                c.n   += (alphaN(v)*(1-c.n)  -betaN(v)*c.n  )*dt;  // K⁺ delayed rectifier
+                // Ionic currents
+                const iNa  = c.gNa  * Math.pow(c.mNa,3)*c.hNa * (v-V_Na); // spike upstroke
+                const iK   = c.gK   * Math.pow(c.n,4)          * (v-V_K);  // repolarisation/AHP
+                const iNaP = c.gNaP * mNaPinf(v)                * (v-V_Na); // persistent, tonic drive
+                const iL   = (c.gL + 1/c.Rin) * (v - c.VL);                // leak
+                // Membrane voltage update: Cm·dV/dt = −iT − iNa − iK − iNaP − iL + Itot
                 c.V = v + (-iT - iNa - iK - iNaP - iL + Itot)/Cm*dt;
                 return c.V;
             }
 
-            // ── LP-filtered bidirectional gap junction ──
+            // ═════════════════════════════════════════════════════════════════════
+            // GAP JUNCTION MODEL  (bidirectional, low-pass filtered)
+            // ═════════════════════════════════════════════════════════════════════
+            // Models an electrical synapse (connexin/innexin pore) between two cells.
+            //
+            // Ideal gap junction:  I_A→B = G · (V_B − V_A)
+            // LP-filtered version: The voltage difference is filtered by a first-order
+            //   low-pass with time constant τ = C/G. This accounts for the effective
+            //   capacitance of the coupling compartment and prevents instantaneous
+            //   artefacts from spike propagation (which would otherwise cause ringing).
+            //
+            //   dVf/dt = (V_B − V_A − Vf) / τ
+            //   I_A    = G · Vf       (into cell A)
+            //   I_B    = −G · Vf      (into cell B, equal and opposite)
+            //
+            // The filter is particularly important for LPTC ↔ MN junctions:
+            //   τ = C/G (pCmn / gJunction) ≈ 0.8/0.1 = 8 ms at default settings.
+            //   This 8 ms time constant prevents individual MN spikes from causing
+            //   large voltage transients in the connected LPTC, while still passing
+            //   the slower rate-coded signal.
+            //
+            // Within-chain LPTC GJs (VS1↔VS2 etc.):
+            //   τ = pClptc / pGlptc ≈ 0.05/0.05 = 1 ms — faster, coupling adjacent cells
+            //   tightly for spatial integration of the VS/HS visual response.
+
+            // Create a new GJ object. G = conductance (nS); C = filter capacitance (nF).
             function createGJ(G, C) {
-                return { G, tau: (G>1e-9 ? C/G : 0), Vf: 0 };
+                return { G, tau: (G>1e-9 ? C/G : 0), Vf: 0 };  // τ = C/G; Vf = filtered voltage difference
             }
+            // One integration step: update Vf and return [I_into_A, I_into_B].
             function gjPair(gj, Va, Vb) {
-                const raw = Vb - Va;
-                if (gj.tau > 1e-9) gj.Vf += (raw - gj.Vf)/gj.tau*dt;
-                else gj.Vf = raw;
-                const IA = gj.G * gj.Vf;
-                return [IA, -IA];  // [into A, into B]
+                const raw = Vb - Va;                                 // instantaneous voltage difference
+                if (gj.tau > 1e-9) gj.Vf += (raw - gj.Vf)/gj.tau*dt;  // LP filter update
+                else gj.Vf = raw;                                    // τ≈0 → ideal (no filter)
+                const IA = gj.G * gj.Vf;                            // current into cell A
+                return [IA, -IA];  // bidirectional: equal and opposite
             }
 
-            // ── Graded synapse (LPTC pre) ──
+            // ═════════════════════════════════════════════════════════════════════
+            // GRADED CHEMICAL SYNAPSE  (LPTC → MN or LPTC → LPTC)
+            // ═════════════════════════════════════════════════════════════════════
+            // Used for non-spiking (LPTC) presynaptic neurons. In graded transmission
+            // the release probability scales continuously with presynaptic voltage,
+            // not with discrete spikes.
+            //
+            // I_syn = −gMax · rel(Vpre) · (Vpost − Erev)
+            //
+            //   rel(Vpre) = clamp( (Vpre − Vthresh) / Vscale, 0, 1 )
+            //     → linear ramp from Vthresh (no release) to Vthresh+Vscale (full release)
+            //   Erev: 0 mV for excitatory (depolarising); −80 mV for inhibitory (GABA, Cl⁻)
+            //   gMax = nSyn · gPerSyn   (total max conductance = contacts × per-contact value)
+            //
+            // Default thresholds: Vthresh = −40 mV, Vscale = 20 mV.
+            //   At Vpre = −40 mV: no release (below threshold, baseline LPTC potential)
+            //   At Vpre = −20 mV: full release (strongly depolarised LPTC)
+
+            // Create a graded synapse. nSyn = number of anatomical contacts from RAW_COUNTS.
             function createGradedSyn(nSyn, gPerSyn, Erev) {
                 return { gMax: nSyn*gPerSyn, Vthresh: pVthresh, Vscale: pVscale, Erev };
             }
+            // Compute synaptic current for one time step.
             function gradedCurrent(s, Vpre, Vpost) {
                 if (s.gMax < 1e-15) return 0;
-                const rel = Math.max(0, Math.min(1, (Vpre-s.Vthresh)/s.Vscale));
-                return -s.gMax * rel * (Vpost - s.Erev);
+                const rel = Math.max(0, Math.min(1, (Vpre-s.Vthresh)/s.Vscale)); // release fraction [0,1]
+                return -s.gMax * rel * (Vpost - s.Erev);                          // driving force × conductance
             }
 
-            // ── Alpha synapse (MN pre, spiking) ──
+            // ═════════════════════════════════════════════════════════════════════
+            // ALPHA-FUNCTION SYNAPSE  (MN → MN, spike-triggered)
+            // ═════════════════════════════════════════════════════════════════════
+            // Used for spiking (MN) presynaptic neurons. Each action potential triggers
+            // a stereotyped conductance transient in the postsynaptic cell.
+            //
+            // The alpha-function conductance profile is:
+            //   g(t) = (gMax/τ) · t · exp(−t/τ)   for t ≥ 0 after spike detection
+            //
+            // Implemented as a two-variable ODE (equivalent to the impulse response
+            // of a second-order system):
+            //   dg/dt  =  dg_kick                  (kick on spike, then decays)
+            //   ddg/dt = −dg / τ
+            //
+            // I_syn = −g · (Vpost − Erev)
+            //
+            // On spike detection (Vpre crosses 0 mV threshold upward):
+            //   dg += gMax / τ   (kick to the derivative, creates the rising phase)
+            //
+            // τ_syn = 5 ms default — roughly matching fast excitatory MN→MN synapses.
+            // gMax = nSyn · gPerSyn.
+
+            // Create an alpha-function synapse object.
             function createAlphaSyn(nSyn, gPerSyn, tau, Erev) {
                 return { gMax: nSyn*gPerSyn, tau, g: 0, dg: 0, prevV: -65, thresh: 0, Erev };
             }
+            // One time step: detect spike, update conductance, return synaptic current.
             function alphaStep(s, Vpre, Vpost) {
+                // Spike detection: upward crossing of threshold (0 mV by default)
                 if (Vpre > s.thresh && s.prevV <= s.thresh) s.dg += s.gMax/s.tau;
                 s.prevV = Vpre;
+                // Advance alpha-function ODE: g rises then decays with time constant tau
                 s.g  += s.dg * dt;
                 s.dg -= s.dg / s.tau * dt;
-                s.g   = Math.max(0, s.g);
+                s.g   = Math.max(0, s.g);                   // prevent negative conductance
                 if (s.gMax < 1e-15) return 0;
-                return -s.g * (Vpost - s.Erev);
+                return -s.g * (Vpost - s.Erev);             // synaptic current (sign: inward = positive)
             }
 
             // ── Default parameters ──
@@ -2919,18 +3207,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             // Plot areas
             html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">'
-                + '<div id="circPlotLPTC_R" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>'
-                + '<div id="circPlotLPTC_L" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '<div id="circPlotLPTC_R" style="width:100%;height:180px;background:#ffffff;border:1px solid #ccc;"></div>'
+                + '<div id="circPlotLPTC_L" style="width:100%;height:180px;background:#ffffff;border:1px solid #ccc;"></div>'
                 + '</div>';
             html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">'
-                + '<div id="circPlotMN_R" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>'
-                + '<div id="circPlotMN_L" style="width:100%;height:180px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '<div id="circPlotMN_R" style="width:100%;height:180px;background:#ffffff;border:1px solid #ccc;"></div>'
+                + '<div id="circPlotMN_L" style="width:100%;height:180px;background:#ffffff;border:1px solid #ccc;"></div>'
                 + '</div>';
             html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">'
-                + '<div id="circPlotPupilTime_R" style="width:100%;height:210px;background:#1a1a1a;border:1px solid #444;"></div>'
-                + '<div id="circPlotPupilTime_L" style="width:100%;height:210px;background:#1a1a1a;border:1px solid #444;"></div>'
+                + '<div id="circPlotPupilTime_R" style="width:100%;height:210px;background:#ffffff;border:1px solid #ccc;"></div>'
+                + '<div id="circPlotPupilTime_L" style="width:100%;height:210px;background:#ffffff;border:1px solid #ccc;"></div>'
                 + '</div>';
-            html += '<div id="circPlotPupilPolar" style="width:100%;height:230px;background:#1a1a1a;border:1px solid #444;"></div>';
+            html += '<div id="circPlotPupilPolar" style="width:100%;height:230px;background:#ffffff;border:1px solid #ccc;"></div>';
             html += '</div>';
 
             circuitContainer.innerHTML = html;
@@ -3485,80 +3773,91 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     for (let k = 1; k <= 4; k++) lptcOrder.push('VS'+k+'_'+s);
                     ['HSN','HSE','HSS'].forEach(h => lptcOrder.push(h+'_'+s));
                 });
-                const colsVS = ['#9c27b0','#7b1fa2','#ce93d8','#e1bee7','#6a1b9a','#4a148c','#ab47bc','#ba68c8'];
-                const colsHS = ['#4fc3f7','#0288d1','#01579b','#80d8ff','#40c4ff','#0091ea'];
-                const lptcColors = {};
-                let vi=0, hi=0;
-                lptcOrder.forEach(n => {
-                    if (n.startsWith('VS')) lptcColors[n] = colsVS[vi++ % colsVS.length];
-                    else lptcColors[n] = colsHS[hi++ % colsHS.length];
-                });
-                function addStimPatch(y0, y1) {
+                // Use mesh colors from neuronColors (injected from neurons.json)
+                // so simulation traces match the 3D viewer colors exactly.
+                function addStimTopLine() {
                     return {
-                        x: [stimStart, stimEnd, stimEnd, stimStart],
-                        y: [y0, y0, y1, y1],
-                        fill: 'toself', fillcolor: 'rgba(255,255,0,0.08)',
-                        line: { width: 0 }, showlegend: false, hoverinfo: 'skip',
+                        type: 'line', xref: 'x', yref: 'paper',
+                        x0: stimStart, x1: stimEnd,
+                        y0: 1.0, y1: 1.0,
+                        line: { color: '#ff6f00', width: 3 },
+                    };
+                }
+                function noGridAxis(cfg) {
+                    return Object.assign({}, cfg, { showgrid: false, zeroline: false });
+                }
+                function noGridAxis2(cfg) {
+                    return Object.assign({}, cfg, { showgrid: false });
+                }
+                function addStimMarkerTrace() {
+                    return {
+                        x: [stimStart, stimEnd],
+                        y: [null, null],
+                        line: { width: 0 },
+                        showlegend: false, hoverinfo: 'skip',
                         type: 'scatter', mode: 'lines',
                     };
                 }
                 const lptcLeft = lptcOrder.filter(n => n.endsWith('_L')).map(n => ({
                     x: tPlot, y: indices.map(i => res.records[n][i]),
                     name: n, type: 'scatter', mode: 'lines',
-                    line: { color: lptcColors[n], width: 1 },
+                    line: { color: neuronColors[n] || '#888', width: 1 },
                 }));
                 const lptcRight = lptcOrder.filter(n => n.endsWith('_R')).map(n => ({
                     x: tPlot, y: indices.map(i => res.records[n][i]),
                     name: n, type: 'scatter', mode: 'lines',
-                    line: { color: lptcColors[n], width: 1 },
+                    line: { color: neuronColors[n] || '#888', width: 1 },
                 }));
-                lptcLeft.push(addStimPatch(-80, 20));
-                lptcRight.push(addStimPatch(-80, 20));
+                lptcLeft.push(addStimMarkerTrace());
+                lptcRight.push(addStimMarkerTrace());
                 Plotly.react('circPlotLPTC_L', lptcLeft, {
-                    title: { text: 'Left LPTCs — soma Vm', font: { size: 11, color: '#ccc' } },
-                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333' },
-                    yaxis: { title: 'mV', color: '#888', gridcolor: '#333', range: [-80, 20] },
-                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
-                    legend: { font: { size: 7, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.5)' },
+                    title: { text: 'Left LPTCs — soma Vm', font: { size: 11, color: '#333' } },
+                    xaxis: noGridAxis({ title: 'ms', color: '#444' }),
+                    yaxis: noGridAxis({ title: 'mV', color: '#444', range: [-80, 20] }),
+                    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+                    legend: { font: { size: 7, color: '#333' }, bgcolor: 'rgba(255,255,255,0.85)', bordercolor: '#ccc', borderwidth: 1 },
+                    shapes: [addStimTopLine()],
                     margin: { l: 40, r: 10, t: 26, b: 30 },
                 }, { responsive: true });
                 Plotly.react('circPlotLPTC_R', lptcRight, {
-                    title: { text: 'Right LPTCs — soma Vm', font: { size: 11, color: '#ccc' } },
-                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333' },
-                    yaxis: { title: 'mV', color: '#888', gridcolor: '#333', range: [-80, 20] },
-                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
-                    legend: { font: { size: 7, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.5)' },
+                    title: { text: 'Right LPTCs — soma Vm', font: { size: 11, color: '#333' } },
+                    xaxis: noGridAxis({ title: 'ms', color: '#444' }),
+                    yaxis: noGridAxis({ title: 'mV', color: '#444', range: [-80, 20] }),
+                    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+                    legend: { font: { size: 7, color: '#333' }, bgcolor: 'rgba(255,255,255,0.85)', bordercolor: '#ccc', borderwidth: 1 },
+                    shapes: [addStimTopLine()],
                     margin: { l: 40, r: 10, t: 26, b: 30 },
                 }, { responsive: true });
 
-                const mnNames = ['MOS_L','MOS_R','MOT_L','MOT_R'];
-                const mnColors = { MOS_L:'#ef5350', MOS_R:'#e53935', MOT_L:'#ff7043', MOT_R:'#ff5722' };
+                // Use mesh colors from neuronColors for motor neuron traces
                 const mnLeft = ['MOS_L','MOT_L'].map(n => ({
                     x: tPlot, y: indices.map(i => res.records[n][i]),
                     name: n, type: 'scatter', mode: 'lines',
-                    line: { color: mnColors[n], width: 1.2 },
+                    line: { color: neuronColors[n] || '#888', width: 1.2 },
                 }));
                 const mnRight = ['MOS_R','MOT_R'].map(n => ({
                     x: tPlot, y: indices.map(i => res.records[n][i]),
                     name: n, type: 'scatter', mode: 'lines',
-                    line: { color: mnColors[n], width: 1.2 },
+                    line: { color: neuronColors[n] || '#888', width: 1.2 },
                 }));
-                mnLeft.push(addStimPatch(-80, 60));
-                mnRight.push(addStimPatch(-80, 60));
+                mnLeft.push(addStimMarkerTrace());
+                mnRight.push(addStimMarkerTrace());
                 Plotly.react('circPlotMN_L', mnLeft, {
-                    title: { text: 'Left Motor Neurons — soma Vm', font: { size: 11, color: '#ccc' } },
-                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333' },
-                    yaxis: { title: 'mV', color: '#888', gridcolor: '#333', range: [-80, 60] },
-                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
-                    legend: { font: { size: 9, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.5)' },
+                    title: { text: 'Left Motor Neurons — soma Vm', font: { size: 11, color: '#333' } },
+                    xaxis: noGridAxis({ title: 'ms', color: '#444' }),
+                    yaxis: noGridAxis({ title: 'mV', color: '#444', range: [-80, 60] }),
+                    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+                    legend: { font: { size: 9, color: '#333' }, bgcolor: 'rgba(255,255,255,0.85)', bordercolor: '#ccc', borderwidth: 1 },
+                    shapes: [addStimTopLine()],
                     margin: { l: 40, r: 10, t: 26, b: 30 },
                 }, { responsive: true });
                 Plotly.react('circPlotMN_R', mnRight, {
-                    title: { text: 'Right Motor Neurons — soma Vm', font: { size: 11, color: '#ccc' } },
-                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333' },
-                    yaxis: { title: 'mV', color: '#888', gridcolor: '#333', range: [-80, 60] },
-                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
-                    legend: { font: { size: 9, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.5)' },
+                    title: { text: 'Right Motor Neurons — soma Vm', font: { size: 11, color: '#333' } },
+                    xaxis: noGridAxis({ title: 'ms', color: '#444' }),
+                    yaxis: noGridAxis({ title: 'mV', color: '#444', range: [-80, 60] }),
+                    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+                    legend: { font: { size: 9, color: '#333' }, bgcolor: 'rgba(255,255,255,0.85)', bordercolor: '#ccc', borderwidth: 1 },
+                    shapes: [addStimTopLine()],
                     margin: { l: 40, r: 10, t: 26, b: 30 },
                 }, { responsive: true });
 
@@ -3629,7 +3928,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         const durS = Math.max(1e-6, (b - a + 1) * dtMs / 1000);
                         hzRaw[i] = nsp / durS;
                     }
-                    return lowpass1(hzRaw, dtMs, 180.0);
+                    return lowpass1(hzRaw, dtMs, 20.0);
                 }
                 function meanPre(arr, t, t0, duration) {
                     // Modified: if duration is provided, use sliding window [t0-duration, t0]
@@ -3752,98 +4051,152 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     };
                 }
                 function overallVector(move) { return overallVectorFromXY(move.x, move.y); }
+                // For component-force arrows (MOS/MOT): use the mean of all active samples so a
+                // sustained pull shows a full-length arrow rather than a near-zero delta.
+                function meanVectorFromXY(xArr, yArr) {
+                    let sx = 0, sy = 0, n = 0;
+                    for (let i = 0; i < xArr.length; i++) {
+                        if (Math.abs(xArr[i]) + Math.abs(yArr[i]) > 0.02) {
+                            sx += xArr[i]; sy += yArr[i]; n++;
+                        }
+                    }
+                    if (n === 0) return { theta: 0, r: 0 };
+                    sx /= n; sy /= n;
+                    return {
+                        theta: (Math.atan2(sy, sx) * 180 / Math.PI + 360) % 360,
+                        r: Math.min(10, Math.sqrt(sx * sx + sy * sy))
+                    };
+                }
+                // For overall eye direction, use the mean pupil displacement during the stim window.
+                // This matches the intuitive "where the eye moved" direction in the polar plot.
+                function windowMeanVectorFromXY(xArr, yArr, tArr, t0, t1) {
+                    let sx = 0, sy = 0, n = 0;
+                    for (let i = 0; i < xArr.length; i++) {
+                        if (tArr[i] >= t0 && tArr[i] <= t1) {
+                            sx += xArr[i];
+                            sy += yArr[i];
+                            n++;
+                        }
+                    }
+                    if (n === 0) return overallVectorFromXY(xArr, yArr);
+                    sx /= n; sy /= n;
+                    return {
+                        theta: (Math.atan2(sy, sx) * 180 / Math.PI + 360) % 360,
+                        r: Math.min(10, Math.sqrt(sx * sx + sy * sy))
+                    };
+                }
+                // Build an arrow entirely inside polar coordinates: shaft line + rotated triangle head + text label.
+                // Marker angle: Plotly uses clockwise-from-north; CCW polar theta → (90 − theta + 360) % 360
+                function makePolarArrow(subplot, vec, color, label, showlegend) {
+                    const mAngle = (90 - vec.theta + 360) % 360;
+                    const labelR = Math.min(10.5, vec.r + 1.2);
+                                        const hasLabel = !!(label && label.trim());
+                                        const labelName = hasLabel ? label : 'Vector';
+                                        const traces = [
+                        // ① Shaft
+                        { type: 'scatterpolar', subplot,
+                          theta: [vec.theta, vec.theta], r: [0, vec.r],
+                                                    mode: 'lines', name: labelName, showlegend,
+                          line: { color, width: 3 },
+                                                    hovertemplate: labelName + ': %{r:.2f} at %{theta:.1f}<extra></extra>' },
+                        // ② Arrowhead — triangle-up rotated to match the shaft direction
+                        { type: 'scatterpolar', subplot,
+                          theta: [vec.theta], r: [vec.r],
+                          mode: 'markers', showlegend: false,
+                          marker: { color, size: 13, symbol: 'triangle-up', angle: mAngle },
+                          hoverinfo: 'skip' },
+                    ];
+                                        if (hasLabel) {
+                                                // ③ Text label slightly beyond the tip
+                                                traces.push({ type: 'scatterpolar', subplot,
+                                                        theta: [vec.theta], r: [labelR],
+                                                        mode: 'text', text: [label], showlegend: false,
+                                                        textfont: { color, size: 9, family: 'Arial, sans-serif' },
+                                                        hoverinfo: 'skip' });
+                                        }
+                                        return traces;
+                }
 
-                const rateMOS_L = robustSpikeRateSeries(res.records['MOS_L'], tMs, 90);
-                const rateMOS_R = robustSpikeRateSeries(res.records['MOS_R'], tMs, 90);
-                const rateMOT_L = robustSpikeRateSeries(res.records['MOT_L'], tMs, 90);
-                const rateMOT_R = robustSpikeRateSeries(res.records['MOT_R'], tMs, 90);
+                                const rateMOS_L = robustSpikeRateSeries(res.records['MOS_L'], tMs, 70);
+                                const rateMOS_R = robustSpikeRateSeries(res.records['MOS_R'], tMs, 70);
+                                const rateMOT_L = robustSpikeRateSeries(res.records['MOT_L'], tMs, 70);
+                                const rateMOT_R = robustSpikeRateSeries(res.records['MOT_R'], tMs, 70);
                 const moveL = buildPupilMotion('L', rateMOS_L, rateMOT_L);
                 const moveR = buildPupilMotion('R', rateMOS_R, rateMOT_R);
-                const vecL = overallVector(moveL), vecR = overallVector(moveR);
-                const mosVecL = overallVectorFromXY(moveL.mosX, moveL.mosY), mosVecR = overallVectorFromXY(moveR.mosX, moveR.mosY);
-                const motVecL = overallVectorFromXY(moveL.motX, moveL.motY), motVecR = overallVectorFromXY(moveR.motX, moveR.motY);
+                const stimStartAbs = preRollMs + stimStart;
+                const stimEndAbs = preRollMs + stimEnd;
+                const vecL = windowMeanVectorFromXY(moveL.x, moveL.y, tMs, stimStartAbs, stimEndAbs);
+                const vecR = windowMeanVectorFromXY(moveR.x, moveR.y, tMs, stimStartAbs, stimEndAbs);
+                const mosVecL = meanVectorFromXY(moveL.mosX, moveL.mosY), mosVecR = meanVectorFromXY(moveR.mosX, moveR.mosY);
+                const motVecL = meanVectorFromXY(moveL.motX, moveL.motY), motVecR = meanVectorFromXY(moveR.motX, moveR.motY);
 
                 Plotly.react('circPlotPupilTime_L', [
-                    { x: tPlot, y: indices.map(i => rateMOS_L[i]), name: 'MOS_L rate', type: 'scatter', mode: 'lines', line: { color: '#ef5350', width: 1.1 } },
-                    { x: tPlot, y: indices.map(i => rateMOT_L[i]), name: 'MOT_L rate', type: 'scatter', mode: 'lines', line: { color: '#ff7043', width: 1.1 } },
-                    { x: tPlot, y: indices.map(i => moveL.r[i]), name: 'Left pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#80cbc4', width: 1.6 } },
-                    { x: [stimStart, stimEnd, stimEnd, stimStart], y: [0, 0, 250, 250], fill: 'toself', fillcolor: 'rgba(255,255,0,0.06)', line: { width: 0 }, showlegend: false, hoverinfo: 'skip', type: 'scatter', mode: 'lines' }
+                    { x: tPlot, y: indices.map(i => rateMOS_L[i]), name: 'MOS_L rate', type: 'scatter', mode: 'lines', line: { color: neuronColors['MOS_L'] || '#4D9221', width: 1.1 } },
+                    { x: tPlot, y: indices.map(i => rateMOT_L[i]), name: 'MOT_L rate', type: 'scatter', mode: 'lines', line: { color: neuronColors['MOT_L'] || '#5E3C99', width: 1.1 } },
+                    { x: tPlot, y: indices.map(i => moveL.r[i]), name: 'Left pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#222222', width: 1.6 } },
+                    addStimMarkerTrace()
                 ], {
-                    title: { text: 'Left Pseudopupil Output', font: { size: 11, color: '#ccc' } },
-                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333', range: [0, simTime] },
-                    yaxis: { title: 'Hz', color: '#888', gridcolor: '#333', rangemode: 'tozero' },
-                    yaxis2: { title: 'deg', overlaying: 'y', side: 'right', color: '#26c6da', range: [0, 10] },
-                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
-                    legend: { font: { size: 8, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.4)' },
+                    title: { text: 'Left Pseudopupil Output', font: { size: 11, color: '#333' } },
+                    xaxis: noGridAxis({ title: 'ms', color: '#444', range: [0, simTime] }),
+                    yaxis: noGridAxis({ title: 'Hz', color: '#444', rangemode: 'tozero' }),
+                    yaxis2: noGridAxis2({ title: 'deg', overlaying: 'y', side: 'right', color: '#00695c', range: [0, 10] }),
+                    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+                    legend: { font: { size: 8, color: '#333' }, bgcolor: 'rgba(255,255,255,0.85)', bordercolor: '#ccc', borderwidth: 1 },
+                    shapes: [addStimTopLine()],
                     margin: { l: 38, r: 44, t: 24, b: 28 },
                 }, { responsive: true });
                 Plotly.react('circPlotPupilTime_R', [
-                    { x: tPlot, y: indices.map(i => rateMOS_R[i]), name: 'MOS_R rate', type: 'scatter', mode: 'lines', line: { color: '#e53935', width: 1.1, dash: 'dot' } },
-                    { x: tPlot, y: indices.map(i => rateMOT_R[i]), name: 'MOT_R rate', type: 'scatter', mode: 'lines', line: { color: '#ff5722', width: 1.1, dash: 'dot' } },
-                    { x: tPlot, y: indices.map(i => moveR.r[i]), name: 'Right pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#29b6f6', width: 1.6 } },
-                    { x: [stimStart, stimEnd, stimEnd, stimStart], y: [0, 0, 250, 250], fill: 'toself', fillcolor: 'rgba(255,255,0,0.06)', line: { width: 0 }, showlegend: false, hoverinfo: 'skip', type: 'scatter', mode: 'lines' }
+                    { x: tPlot, y: indices.map(i => rateMOS_R[i]), name: 'MOS_R rate', type: 'scatter', mode: 'lines', line: { color: neuronColors['MOS_R'] || '#61A635', width: 1.1, dash: 'dot' } },
+                    { x: tPlot, y: indices.map(i => rateMOT_R[i]), name: 'MOT_R rate', type: 'scatter', mode: 'lines', line: { color: neuronColors['MOT_R'] || '#7C5AB7', width: 1.1, dash: 'dot' } },
+                    { x: tPlot, y: indices.map(i => moveR.r[i]), name: 'Right pupil |Δ|', type: 'scatter', mode: 'lines', yaxis: 'y2', line: { color: '#222222', width: 1.6 } },
+                    addStimMarkerTrace()
                 ], {
-                    title: { text: 'Right Pseudopupil Output', font: { size: 11, color: '#ccc' } },
-                    xaxis: { title: 'ms', color: '#888', gridcolor: '#333', range: [0, simTime] },
-                    yaxis: { title: 'Hz', color: '#888', gridcolor: '#333', rangemode: 'tozero' },
-                    yaxis2: { title: 'deg', overlaying: 'y', side: 'right', color: '#26c6da', range: [0, 10] },
-                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
-                    legend: { font: { size: 8, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.4)' },
+                    title: { text: 'Right Pseudopupil Output', font: { size: 11, color: '#333' } },
+                    xaxis: noGridAxis({ title: 'ms', color: '#444', range: [0, simTime] }),
+                    yaxis: noGridAxis({ title: 'Hz', color: '#444', rangemode: 'tozero' }),
+                    yaxis2: noGridAxis2({ title: 'deg', overlaying: 'y', side: 'right', color: '#01579b', range: [0, 10] }),
+                    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+                    legend: { font: { size: 8, color: '#333' }, bgcolor: 'rgba(255,255,255,0.85)', bordercolor: '#ccc', borderwidth: 1 },
+                    shapes: [addStimTopLine()],
                     margin: { l: 38, r: 44, t: 24, b: 28 },
                 }, { responsive: true });
 
                 const sampleStep = Math.max(1, Math.floor(indices.length / 520));
                 const thR = [], rR = [], thL = [], rL = [];
-                const mosThR = [], mosRR = [], mosThL = [], mosRL = [];
-                const motThR = [], motRR = [], motThL = [], motRL = [];
-                function angleDeg(x, y) {
-                    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
-                }
                 for (let i = 0; i < indices.length; i += sampleStep) {
                     const j = indices[i];
                     thR.push(moveR.th[j]); rR.push(moveR.r[j]);
                     thL.push(moveL.th[j]); rL.push(moveL.r[j]);
-                    const mxR = moveR.mosX[j], myR = moveR.mosY[j];
-                    const mxL = moveL.mosX[j], myL = moveL.mosY[j];
-                    const txR = moveR.motX[j], tyR = moveR.motY[j];
-                    const txL = moveL.motX[j], tyL = moveL.motY[j];
-                    const mrR = Math.sqrt(mxR * mxR + myR * myR);
-                    const mrL = Math.sqrt(mxL * mxL + myL * myL);
-                    const trR = Math.sqrt(txR * txR + tyR * tyR);
-                    const trL = Math.sqrt(txL * txL + tyL * tyL);
-                    if (mrR > 0.03) { mosThR.push(angleDeg(mxR, myR)); mosRR.push(mrR); }
-                    if (mrL > 0.03) { mosThL.push(angleDeg(mxL, myL)); mosRL.push(mrL); }
-                    if (trR > 0.03) { motThR.push(angleDeg(txR, tyR)); motRR.push(trR); }
-                    if (trL > 0.03) { motThL.push(angleDeg(txL, tyL)); motRL.push(trL); }
                 }
                 const mosNetR = Math.max(0.9, mosVecR.r), mosNetL = Math.max(0.9, mosVecL.r);
                 const motNetR = Math.max(0.9, motVecR.r), motNetL = Math.max(0.9, motVecL.r);
                 const netR = Math.max(1.0, vecR.r), netL = Math.max(1.0, vecL.r);
-                Plotly.react('circPlotPupilPolar', [
-                    { type: 'scatterpolar', subplot: 'polar', mode: 'lines+markers', theta: thR, r: rR, name: 'Right trajectory', line: { color: '#29b6f6', width: 1.6 }, marker: { color: '#29b6f6', size: 3, opacity: 0.7 } },
-                    { type: 'barpolar', subplot: 'polar', theta: thR, r: rR, width: thR.map(() => 3), opacity: 0.22, marker: { color: '#29b6f6' }, name: 'Right path vectors' },
-                    { type: 'barpolar', subplot: 'polar', theta: mosThR, r: mosRR, width: mosThR.map(() => 3), opacity: 0.35, marker: { color: '#4D9221' }, name: 'MOS force (time)' },
-                    { type: 'barpolar', subplot: 'polar', theta: motThR, r: motRR, width: motThR.map(() => 3), opacity: 0.35, marker: { color: '#5E3C99' }, name: 'MOT force (time)' },
-                    { type: 'barpolar', subplot: 'polar', theta: [mosVecR.theta], r: [mosNetR], width: [14], opacity: 0.95, marker: { color: '#4D9221', line: { color: '#dcedc8', width: 1 } }, name: 'MOS force (net)' },
-                    { type: 'barpolar', subplot: 'polar', theta: [motVecR.theta], r: [motNetR], width: [14], opacity: 0.95, marker: { color: '#5E3C99', line: { color: '#ede7f6', width: 1 } }, name: 'MOT force (net)' },
-                    { type: 'barpolar', subplot: 'polar', theta: [vecR.theta], r: [netR], width: [16], opacity: 0.95, marker: { color: '#00e5ff' }, name: 'Right net direction' },
-                    { type: 'scatterpolar', subplot: 'polar2', mode: 'lines+markers', theta: thL, r: rL, name: 'Left trajectory', line: { color: '#80cbc4', width: 1.6 }, marker: { color: '#80cbc4', size: 3, opacity: 0.7 } },
-                    { type: 'barpolar', subplot: 'polar2', theta: thL, r: rL, width: thL.map(() => 3), opacity: 0.22, marker: { color: '#80cbc4' }, name: 'Left path vectors' },
-                    { type: 'barpolar', subplot: 'polar2', theta: mosThL, r: mosRL, width: mosThL.map(() => 3), opacity: 0.35, marker: { color: '#4D9221' }, name: 'MOS force (time)', showlegend: false },
-                    { type: 'barpolar', subplot: 'polar2', theta: motThL, r: motRL, width: motThL.map(() => 3), opacity: 0.35, marker: { color: '#5E3C99' }, name: 'MOT force (time)', showlegend: false },
-                    { type: 'barpolar', subplot: 'polar2', theta: [mosVecL.theta], r: [mosNetL], width: [14], opacity: 0.95, marker: { color: '#4D9221', line: { color: '#dcedc8', width: 1 } }, name: 'MOS force (net)', showlegend: false },
-                    { type: 'barpolar', subplot: 'polar2', theta: [motVecL.theta], r: [motNetL], width: [14], opacity: 0.95, marker: { color: '#5E3C99', line: { color: '#ede7f6', width: 1 } }, name: 'MOT force (net)', showlegend: false },
-                    { type: 'barpolar', subplot: 'polar2', theta: [vecL.theta], r: [netL], width: [16], opacity: 0.95, marker: { color: '#76ff03' }, name: 'Left net direction' }
-                ], {
-                    title: { text: 'Pseudopupil Direction Vectors (Toy Model)', font: { size: 11, color: '#ccc' } },
-                    paper_bgcolor: '#1a1a1a', plot_bgcolor: '#1a1a1a',
+                const polarTraces = [
+                    // Right eye trajectory + 3 arrows (MOS, MOT, net)
+                    { type: 'scatterpolar', subplot: 'polar', mode: 'lines+markers', theta: thR, r: rR,
+                      name: 'Right trajectory', line: { color: '#222222', width: 1.2 },
+                      marker: { color: '#222222', size: 3, opacity: 0.55 } },
+                    ...makePolarArrow('polar',  { theta: mosVecR.theta, r: mosNetR }, '#4D9221', '',      false),
+                    ...makePolarArrow('polar',  { theta: motVecR.theta, r: motNetR }, '#5E3C99', '',      false),
+                    ...makePolarArrow('polar',  { theta: vecR.theta,    r: netR    }, '#111111', 'Net R', true),
+                    // Left eye trajectory + 3 arrows
+                    { type: 'scatterpolar', subplot: 'polar2', mode: 'lines+markers', theta: thL, r: rL,
+                      name: 'Left trajectory',  line: { color: '#222222', width: 1.2 },
+                      marker: { color: '#222222', size: 3, opacity: 0.55 } },
+                    ...makePolarArrow('polar2', { theta: mosVecL.theta, r: mosNetL }, '#4D9221', '',      false),
+                    ...makePolarArrow('polar2', { theta: motVecL.theta, r: motNetL }, '#5E3C99', '',      false),
+                    ...makePolarArrow('polar2', { theta: vecL.theta,    r: netL    }, '#111111', 'Net L', false),
+                ];
+                Plotly.react('circPlotPupilPolar', polarTraces, {
+                    title: { text: 'Pseudopupil Direction Vectors (Toy Model)', font: { size: 11, color: '#333' } },
+                    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
                     polar: {
                         domain: { x: [0.0, 0.48], y: [0, 1] },
-                        bgcolor: '#1a1a1a', radialaxis: { range: [0, 10], color: '#888', gridcolor: '#333' },
+                        bgcolor: '#f8f8f8', radialaxis: { range: [0, 11.5], color: '#555', showgrid: false },
                         angularaxis: {
                             direction: 'counterclockwise',
-                            color: '#888',
-                            gridcolor: '#333',
+                            color: '#555',
+                            showgrid: false,
                             tickmode: 'array',
                             tickvals: [0, 90, 180, 270],
                             ticktext: ['front', 'up', 'back', 'down']
@@ -3851,21 +4204,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     },
                     polar2: {
                         domain: { x: [0.52, 1.0], y: [0, 1] },
-                        bgcolor: '#1a1a1a', radialaxis: { range: [0, 10], color: '#888', gridcolor: '#333' },
+                        bgcolor: '#f8f8f8', radialaxis: { range: [0, 11.5], color: '#555', showgrid: false },
                         angularaxis: {
                             direction: 'counterclockwise',
-                            color: '#888',
-                            gridcolor: '#333',
+                            color: '#555',
+                            showgrid: false,
                             tickmode: 'array',
                             tickvals: [0, 90, 180, 270],
                             ticktext: ['back', 'up', 'front', 'down']
                         }
                     },
                     annotations: [
-                        { text: 'Right eye (front/back/up/down)', x: 0.24, y: 1.08, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#29b6f6', size: 10 } },
-                        { text: 'Left eye (front/back/up/down)', x: 0.76, y: 1.08, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#80cbc4', size: 10 } }
+                        { text: 'Right eye', x: 0.24, y: 1.06, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#0277bd', size: 10 } },
+                        { text: 'Left eye',  x: 0.76, y: 1.06, xref: 'paper', yref: 'paper', showarrow: false, font: { color: '#2e7d32', size: 10 } }
                     ],
-                    legend: { font: { size: 8, color: '#ccc' }, bgcolor: 'rgba(0,0,0,0.4)' },
+                    legend: { font: { size: 8, color: '#333' }, bgcolor: 'rgba(255,255,255,0.85)', bordercolor: '#ccc', borderwidth: 1 },
                     margin: { l: 20, r: 20, t: 40, b: 20 }
                 }, { responsive: true });
             }
@@ -3943,13 +4296,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             // Plot areas
             h2 += '<div style="color:#888;font-size:10px;padding:2px 0;">LPTC soma Vm \u2014 all VS &amp; HS cells</div>';
-            h2 += '<div id="mcPlotLPTC" style="width:100%;height:160px;background:#1a1a1a;border:1px solid #444;"></div>';
-            h2 += '<div style="color:#888;font-size:10px;padding:2px 0;">MN compartments \u2014 MOS &amp; MOT (dotted=dend, dashed=soma, solid=axon)</div>';
-            h2 += '<div id="mcPlotMN" style="width:100%;height:200px;background:#1a1a1a;border:1px solid #444;"></div>';
-            h2 += '<div style="color:#888;font-size:10px;padding:2px 0;">Motor output \u2014 MOS axis vs MOT axis (orthogonal eye movement)</div>';
-            h2 += '<div id="mcPlotMuscle" style="width:100%;height:130px;background:#1a1a1a;border:1px solid #444;"></div>';
-            h2 += '<div style="color:#888;font-size:10px;padding:2px 0;">2D eye direction \u2014 MOS horizontal, MOT vertical (vector sum L\u2212R)</div>';
-            h2 += '<div id="mcPlotEyeDir" style="width:100%;height:160px;background:#1a1a1a;border:1px solid #444;"></div>';
+            h2 += '<div id="mcPlotLPTC" style="width:100%;height:160px;background:#ffffff;border:1px solid #ccc;"></div>';
+            h2 += '<div style="color:#555;font-size:10px;padding:2px 0;">MN compartments \u2014 MOS &amp; MOT (dotted=dend, dashed=soma, solid=axon)</div>';
+            h2 += '<div id="mcPlotMN" style="width:100%;height:200px;background:#ffffff;border:1px solid #ccc;"></div>';
+            h2 += '<div style="color:#555;font-size:10px;padding:2px 0;">Motor output \u2014 MOS axis vs MOT axis (orthogonal eye movement)</div>';
+            h2 += '<div id="mcPlotMuscle" style="width:100%;height:130px;background:#ffffff;border:1px solid #ccc;"></div>';
+            h2 += '<div style="color:#555;font-size:10px;padding:2px 0;">2D eye direction \u2014 MOS horizontal, MOT vertical (vector sum L\u2212R)</div>';
+            h2 += '<div id="mcPlotEyeDir" style="width:100%;height:160px;background:#ffffff;border:1px solid #ccc;"></div>';
             h2 += '</div>';
 
             mcCont.innerHTML = h2;
@@ -4442,14 +4795,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         line: { color: neuronColors[n]||'#aaa', width: 1.0 },
                     }));
                 lptcTraces.push({ x:[p.tstart,p.tend,p.tend,p.tstart], y:[-80,-80,20,20],
-                    fill:'toself', fillcolor:'rgba(255,255,0,0.07)', line:{width:0},
+                    fill:'toself', fillcolor:'rgba(255,140,0,0.18)', line:{width:0},
                     showlegend:false, hoverinfo:'skip', type:'scatter', mode:'lines' });
                 Plotly.react('mcPlotLPTC', lptcTraces, {
-                    title: { text:'LPTC Soma Vm (VS + HS)', font:{size:10,color:'#ccc'} },
-                    xaxis: { title:'ms', color:'#888', gridcolor:'#333' },
-                    yaxis: { title:'mV', color:'#888', gridcolor:'#333', range:[-80,20] },
-                    paper_bgcolor:'#1a1a1a', plot_bgcolor:'#1a1a1a',
-                    legend:{ font:{size:8,color:'#ccc'}, bgcolor:'rgba(0,0,0,0.5)' },
+                    title: { text:'LPTC Soma Vm (VS + HS)', font:{size:10,color:'#333'} },
+                    xaxis: { title:'ms', color:'#444', gridcolor:'#ddd' },
+                    yaxis: { title:'mV', color:'#444', gridcolor:'#ddd', range:[-80,20] },
+                    paper_bgcolor:'#ffffff', plot_bgcolor:'#ffffff',
+                    legend:{ font:{size:8,color:'#333'}, bgcolor:'rgba(255,255,255,0.85)', bordercolor:'#ccc', borderwidth:1 },
                     margin:{l:40,r:10,t:24,b:28},
                 }, {responsive:true});
 
@@ -4462,14 +4815,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     mnTraces.push({ x:t, y:res.axon[ci], name:n+' axon',  type:'scatter', mode:'lines', line:{color:col, width:1.5} });
                 });
                 mnTraces.push({ x:[p.tstart,p.tend,p.tend,p.tstart], y:[-80,-80,70,70],
-                    fill:'toself', fillcolor:'rgba(255,255,0,0.07)', line:{width:0},
+                    fill:'toself', fillcolor:'rgba(255,140,0,0.18)', line:{width:0},
                     showlegend:false, hoverinfo:'skip', type:'scatter', mode:'lines' });
                 Plotly.react('mcPlotMN', mnTraces, {
-                    title: { text:'MN Compartments  (dotted=dend, dashed=soma, solid=axon)', font:{size:10,color:'#ccc'} },
-                    xaxis: { title:'ms', color:'#888', gridcolor:'#333' },
-                    yaxis: { title:'mV', color:'#888', gridcolor:'#333', range:[-80,70] },
-                    paper_bgcolor:'#1a1a1a', plot_bgcolor:'#1a1a1a',
-                    legend:{ font:{size:8,color:'#ccc'}, bgcolor:'rgba(0,0,0,0.5)' },
+                    title: { text:'MN Compartments  (dotted=dend, dashed=soma, solid=axon)', font:{size:10,color:'#333'} },
+                    xaxis: { title:'ms', color:'#444', gridcolor:'#ddd' },
+                    yaxis: { title:'mV', color:'#444', gridcolor:'#ddd', range:[-80,70] },
+                    paper_bgcolor:'#ffffff', plot_bgcolor:'#ffffff',
+                    legend:{ font:{size:8,color:'#333'}, bgcolor:'rgba(255,255,255,0.85)', bordercolor:'#ccc', borderwidth:1 },
                     margin:{l:40,r:10,t:24,b:28},
                 }, {responsive:true});
 
@@ -4481,11 +4834,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                              line:{ color: neuronColors[n]||'#ff8a65', width:1.5, dash: isMOS ? 'solid' : 'dash' } };
                 });
                 Plotly.react('mcPlotMuscle', muscTraces, {
-                    title: { text:'Muscle Tension \u2014 MOS=horizontal axis (solid), MOT=vertical axis (dashed)', font:{size:10,color:'#ccc'} },
-                    xaxis: { title:'ms', color:'#888', gridcolor:'#333' },
-                    yaxis: { title:'AU', color:'#888', gridcolor:'#333', rangemode:'tozero' },
-                    paper_bgcolor:'#1a1a1a', plot_bgcolor:'#1a1a1a',
-                    legend:{ font:{size:8,color:'#ccc'}, bgcolor:'rgba(0,0,0,0.5)' },
+                    title: { text:'Muscle Tension \u2014 MOS=horizontal axis (solid), MOT=vertical axis (dashed)', font:{size:10,color:'#333'} },
+                    xaxis: { title:'ms', color:'#444', gridcolor:'#ddd' },
+                    yaxis: { title:'AU', color:'#444', gridcolor:'#ddd', rangemode:'tozero' },
+                    paper_bgcolor:'#ffffff', plot_bgcolor:'#ffffff',
+                    legend:{ font:{size:8,color:'#333'}, bgcolor:'rgba(255,255,255,0.85)', bordercolor:'#ccc', borderwidth:1 },
                     margin:{l:40,r:10,t:24,b:28},
                 }, {responsive:true});
 
@@ -4519,11 +4872,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     }
                 }
                 Plotly.react('mcPlotEyeDir', eyeTraces, {
-                    title: { text:'Eye Movement Vector (MOS=horiz, MOT=vert) \u2014 L minus R', font:{size:10,color:'#ccc'} },
-                    xaxis: { title:'ms', color:'#888', gridcolor:'#333' },
-                    yaxis: { title:'L\u2212R (AU)', color:'#888', gridcolor:'#333', zeroline:true, zerolinecolor:'#555' },
-                    paper_bgcolor:'#1a1a1a', plot_bgcolor:'#1a1a1a',
-                    legend:{ font:{size:8,color:'#ccc'}, bgcolor:'rgba(0,0,0,0.5)' },
+                    title: { text:'Eye Movement Vector (MOS=horiz, MOT=vert) \u2014 L minus R', font:{size:10,color:'#333'} },
+                    xaxis: { title:'ms', color:'#444', gridcolor:'#ddd' },
+                    yaxis: { title:'L\u2212R (AU)', color:'#444', gridcolor:'#ddd', zeroline:true, zerolinecolor:'#bbb' },
+                    paper_bgcolor:'#ffffff', plot_bgcolor:'#ffffff',
+                    legend:{ font:{size:8,color:'#333'}, bgcolor:'rgba(255,255,255,0.85)', bordercolor:'#ccc', borderwidth:1 },
                     margin:{l:40,r:10,t:24,b:28},
                 }, {responsive:true});
             }

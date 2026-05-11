@@ -1,4 +1,29 @@
 """
+generate_skeleton_plots.py — Step 2 of the MESH pipeline
+=========================================================
+Generates 2D PNG projection plots of neuron meshes with overlapping faces
+highlighted, for a quick visual overview of all contact regions.
+
+WHAT IT DOES
+------------
+For each pair of neurons that have overlap faces (from ``contact_faces.csv``):
+  1. Load both neuron meshes (OBJ files from ``neuron_meshes/``).
+  2. Project mesh triangles into a top-down (XY), front (XZ), or side (YZ) view.
+  3. Draw the projected mesh triangles as filled polygons (using matplotlib
+     ``PolyCollection``) in each neuron's configured color.
+  4. Highlight overlapping faces in red (``#FF0030``) on top.
+  5. Save to ``skeleton_plots/<source>_<target>.png``.
+
+In addition, 9 summary scenarios are produced:
+  - ALL, MOT-only, MOS-only (for each: all neurons, left hemisphere, right hemisphere)
+
+REQUIREMENTS
+------------
+trimesh, navis, matplotlib, pandas, numpy, tqdm
+Run after overlap_analysis.py (needs contact_faces.csv and OBJ meshes).
+"""
+
+"""
 Quick script to generate skeleton/volume overlap plots from existing analysis results.
 Run this after overlap_analysis.py has completed to generate the 2D PNG plots.
 """

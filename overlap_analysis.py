@@ -1,3 +1,48 @@
+"""
+overlap_analysis.py — Step 1 of the MESH pipeline
+===================================================
+Downloads FlyWire neuron meshes, computes pairwise spatial overlaps, finds
+contact patches, and extracts synaptic connections.
+
+ALGORITHM
+---------
+1. Load neuron configuration from ``neurons.json`` (IDs, colors, pairing rules).
+2. For each neuron, download the surface mesh from FlyWire (fafbseg / CloudVolume)
+   and cache it as an OBJ file under ``neuron_meshes/``.  Subsequent runs load the
+   cached OBJ instead of re-downloading.
+3. For every pair of neurons defined by ``pairing_rules`` (default: all-vs-all):
+   a. Build a k-d tree over one mesh's vertices.
+   b. Query the other mesh's face centroids against the k-d tree.
+   c. Faces closer than ``THRESHOLDS_MICRONS`` (default 0.1 µm = 100 nm) are
+      considered "overlapping" — i.e., within one dendritic spine width.
+   d. Overlapping faces are ranked into Top-N contact patches by connected area.
+4. Download synaptic connections between all synapse-group neurons from the CAVE
+   annotation database (FlyWire mat783, auto-snap).
+5. Save results to ``comprehensive_overlap_results_YYYY-MM-DD/``:
+   - ``all_results_combined.csv``       – per-pair summary (area, patch count, etc.)
+   - ``synapses.csv``                   – synapse list with 3-D coordinates
+   - ``geometric_data/contact_faces.csv``    – overlap face geometry
+   - ``geometric_data/contact_vertices.csv`` – overlap vertex coordinates
+   - ``matrix_overlap_area_<thresh>.csv``    – NxN overlap area matrix
+   - ``meshes_and_overlaps_*.html``          – interactive 3D Plotly viewer
+
+CACHING
+-------
+The script checks for existing OBJ files before downloading, and skips pairs
+whose contact CSVs already exist.  To force a full re-run, delete the
+``neuron_meshes/`` folder and the relevant CSV files.
+
+RUNTIME
+-------
+- First run: ~2 hours (mesh download ~1.4 GB + overlap computation)
+- Subsequent runs with full cache: ~10-30 minutes (overlap computation only)
+
+REQUIREMENTS
+------------
+fafbseg, navis, trimesh, numpy, pandas, scipy, plotly, tqdm
+FlyWire CAVE token (env var ``FLYWIRE_TOKEN`` or ``~/.cloudvolume/secrets/cave-secret.json``)
+"""
+
 # Comprehensive Pairwise Neuron Analysis Script
 # This script analyzes all neuron pairs at multiple distance thresholds
 
