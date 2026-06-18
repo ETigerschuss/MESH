@@ -70,6 +70,7 @@ Uses neurons.json for neuron IDs and colors (no hardcoded lists).
 
 import os
 import json
+import re
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
@@ -78,6 +79,8 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import time
+
+from mesh_config import load_config as load_mesh_config
 
 try:
     from cloudvolume import CloudVolume
@@ -134,11 +137,8 @@ def cv_download(vol, x0, x1, y0, y1, z0, z1, label=""):
 # ─── Configuration ────────────────────────────────────────────────────
 
 def load_config():
-    """Load neuron IDs, names, colors from neurons.json."""
-    base = os.path.dirname(os.path.abspath(__file__))
-    nf = os.path.join(base, 'neurons.json')
-    with open(nf, 'r') as f:
-        cfg = json.load(f)
+    """Load neuron IDs, names, colors from the active config profile."""
+    cfg, _ = load_mesh_config()
 
     neuron_ids = {}   # flyid -> name
     neuron_colors = {}  # name -> (r, g, b)
@@ -158,6 +158,14 @@ def resolve_results_dir():
     if candidates:
         return os.path.join(base, sorted(candidates)[-1])
     return os.path.join(base, 'comprehensive_overlap_results')
+
+
+def _coord_tag(center_nm):
+    """Compact coordinate suffix for filenames (nm, integer-rounded)."""
+    cx = int(round(center_nm[0]))
+    cy = int(round(center_nm[1]))
+    cz = int(round(center_nm[2]))
+    return f"x{cx}_y{cy}_z{cz}"
 
 
 # ─── EM Snapshot Creator ─────────────────────────────────────────────
@@ -433,7 +441,8 @@ def main():
                 # File naming
                 if z_off == entry['z_lo']:
                     # treat the first slice as "center" (segmented)
-                    fname_center = f"overlap_{idx}_segmented.png"
+                    coord = _coord_tag(center_nm)
+                    fname_center = f"overlap_{idx}_{coord}_segmented.png"
                     opath_c = os.path.join(em_snap_dir, fname_center)
                     if not os.path.exists(opath_c):
                         img = create_segmented_snapshot(
@@ -450,7 +459,8 @@ def main():
                 # Z-offset file (relative to cluster z_lo)
                 rel_z = z_off - entry['z_lo']
                 sign = '+' if rel_z >= 0 else '-'
-                fname = f"overlap_{idx}_z{sign}{abs(rel_z):03d}.png"
+                coord = _coord_tag(center_nm)
+                fname = f"overlap_{idx}_{coord}_z{sign}{abs(rel_z):03d}.png"
                 opath = os.path.join(em_snap_dir, fname)
 
                 if os.path.exists(opath):
@@ -556,11 +566,12 @@ def main():
         c_new = c_skip = 0
         for patch in tqdm(all_patches, desc="Contacts"):
             pidx = patch['idx']
+            center_coord = _coord_tag(patch['center'])
             for z_off in range(-20, 21):
                 if z_off == 0:
-                    fname = f"contact_{pidx}_segmented.png"
+                    fname = f"contact_{pidx}_{center_coord}_segmented.png"
                 else:
-                    fname = f"contact_{pidx}_z{z_off:+04d}.png"
+                    fname = f"contact_{pidx}_{center_coord}_z{z_off:+04d}.png"
                 opath = os.path.join(em_snap_dir, fname)
                 if os.path.exists(opath):
                     c_skip += 1
@@ -612,11 +623,12 @@ def main():
             if sid is None or tid is None:
                 continue
             center_nm = (row['x'], row['y'], row['z'])
+            center_coord = _coord_tag(center_nm)
             for z_off in range(-20, 21):
                 if z_off == 0:
-                    fname = f"synapse_{orig_idx}_segmented.png"
+                    fname = f"synapse_{orig_idx}_{center_coord}_segmented.png"
                 else:
-                    fname = f"synapse_{orig_idx}_z{z_off:+04d}.png"
+                    fname = f"synapse_{orig_idx}_{center_coord}_z{z_off:+04d}.png"
                 opath = os.path.join(em_snap_dir, fname)
                 if os.path.exists(opath):
                     s_skip += 1

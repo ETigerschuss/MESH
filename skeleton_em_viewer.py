@@ -51,7 +51,7 @@ a single published parameter table.
 
 STANDALONE USAGE
 ----------------
-Run from the project root (where neurons.json lives)::
+Run from the project root::
 
         python skeleton_em_viewer.py
 
@@ -75,10 +75,11 @@ REQUIRED INPUTS (inside RESULTS_DIR)
 * ``neuron_meshes/<id>.obj``         — neuron surface meshes (optional)
 * ``em_snaps/``                      — PNG snapshots at each contact/overlap
 
-CONFIGURATION (neurons.json)
-------------------------------
+CONFIGURATION (active neuron config)
+------------------------------------
 All neuron identities, colors, synapse groups, and pipeline parameters are
-read from ``neurons.json`` in the same directory as this script.  Keys used:
+read from the active config profile (``neurons.json`` by default, or
+``MESH_NEURON_CONFIG`` when set). Keys used:
 
 * ``neurons``          — dict of name → {id, color_hex, group, ...}
 * ``viewer_neurons``   — ordered list of neuron names to show in the sidebar
@@ -120,10 +121,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import trimesh
 
-# ── Config from neurons.json ──────────────────────────────────────────
+from mesh_config import load_config
+
+# ── Config from active profile ────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(SCRIPT_DIR, 'neurons.json'), 'r') as f:
-    _cfg = json.load(f)
+_cfg, CONFIG_PATH = load_config()
 
 NEURON_CFG = _cfg['neurons']
 NEURON_IDS = {info['id']: name for name, info in NEURON_CFG.items()}
@@ -513,6 +515,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         // except the em_snaps/*.png images (relative paths).
         // ─────────────────────────────────────────────────────────────────────
         const snapshotMap   = {SNAPSHOT_JSON};
+        const snapshotZMap  = {SNAPSHOT_ZMAP_JSON};
         const contactClusterMap = {CLUSTER_MAP_JSON};
         const neuronNames   = {NEURON_NAMES_JSON};
         const traceInfo     = {TRACE_INFO_JSON};
@@ -1250,6 +1253,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         function loadZStackImage(kind, idx, zOffset, gen) {
             const sign = zOffset >= 0 ? '+' : '-';
             const zStr = 'z' + sign + String(Math.abs(zOffset)).padStart(3, '0');
+            const mapped = snapshotZMap
+                && snapshotZMap[kind]
+                && snapshotZMap[kind][idx]
+                && snapshotZMap[kind][idx][zOffset];
             emImage.onerror = function() {
                 if (gen !== _loadGen) return;  // stale callback
                 const center = snapshotMap[kind] && snapshotMap[kind][idx];
@@ -1265,7 +1272,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             if (kind === 'contact' && contactClusterMap[idx] !== undefined) {
                 filePrefix = 'cluster_' + contactClusterMap[idx];
             }
-            emImage.src = 'em_snaps/' + filePrefix + '_' + zStr + '.png';
+            emImage.src = mapped || ('em_snaps/' + filePrefix + '_' + zStr + '.png');
         }
 
         function updateZValue(z) {
@@ -4955,10 +4962,6 @@ def load_contacts(results_dir):
     df = pd.read_csv(csv_file)
     df = df[df['Has_Contact'] == True]
 
-    # Read N_TOP_PATCHES from neurons.json
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
-    with open(cfg_path, 'r') as f:
-        _cfg = json.load(f)
     n_top = _cfg.get('top_patches', 10)
 
     all_patches = []
@@ -5229,11 +5232,7 @@ def load_overlap_faces(results_dir):
         print(f"[overlap faces] Fast CSV read failed ({e}); retrying with python engine...")
         df = pd.read_csv(csv_file, engine='python')
 
-    # Read decimation setting from neurons.json (default: 80nm = slight)
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
-    with open(cfg_path, 'r') as f:
-        _fcfg = json.load(f)
-    decimate_nm = _fcfg.get('face_decimation_nm', 80)  # 0 = no decimation
+    decimate_nm = _cfg.get('face_decimation_nm', 80)  # 0 = no decimation
 
     # Detect degenerate faces (all 3 vertices identical = recycling bug)
     degen = (
@@ -5357,10 +5356,6 @@ def load_overlap_table(results_dir):
     df = pd.read_csv(csv_file)
     contacts = df[df['Has_Contact'] == True]
 
-    # Read N_TOP_PATCHES
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
-    with open(cfg_path, 'r') as f:
-        _cfg = json.load(f)
     n_top = _cfg.get('top_patches', 10)
 
     table = []
@@ -5722,7 +5717,28 @@ def build_figure(mesh_dir):
 
 def index_em_snapshots(em_snap_dir, contacts, synapses, results_dir):
     """Index EM snapshots as relative file paths (not base64, to keep HTML small)."""
+    import re
     snapshot_map = {'contact': {}, 'synapse': {}, 'overlap': {}}
+    zstack_map = {'contact': {}, 'synapse': {}, 'overlap': {}}
+    em_files = os.listdir(em_snap_dir) if os.path.isdir(em_snap_dir) else []
+
+    def _coord_tag_xyz(x, y, z):
+        return f"x{int(round(x))}_y{int(round(y))}_z{int(round(z))}"
+
+    def _find_segmented(kind, idx, expected_coord=None):
+        idx = int(idx)
+        if expected_coord is not None:
+            expected = f"{kind}_{idx}_{expected_coord}_segmented.png"
+            if expected in em_files:
+                return expected
+        legacy = f"{kind}_{idx}_segmented.png"
+        if legacy in em_files:
+            return legacy
+        pat = re.compile(rf"^{re.escape(kind)}_{idx}_.*_segmented\.png$")
+        for fname in em_files:
+            if pat.match(fname):
+                return fname
+        return None
 
     # Load cluster mapping (generate_em_stacks.py now clusters nearby patches)
     cluster_map_file = os.path.join(results_dir, 'contact_cluster_map.json')
@@ -5746,30 +5762,91 @@ def index_em_snapshots(em_snap_dir, contacts, synapses, results_dir):
                 snapshot_map['contact'][idx_int] = f"em_snaps/{fname}"
                 indexed_clusters.add(cid)
         else:
-            fname = f"contact_{idx_int}_segmented.png"
-            if os.path.exists(os.path.join(em_snap_dir, fname)):
+            fname = _find_segmented('contact', idx_int)
+            if fname:
                 snapshot_map['contact'][idx_int] = f"em_snaps/{fname}"
     print(f"[snapshots] Indexed {len(snapshot_map['contact'])} contacts "
           f"({len(indexed_clusters)} unique clusters) [file paths]")
 
     for idx in synapses['index'].unique():
-        fname = f"synapse_{int(idx)}_segmented.png"
-        if os.path.exists(os.path.join(em_snap_dir, fname)):
-            snapshot_map['synapse'][int(idx)] = f"em_snaps/{fname}"
+        idx_int = int(idx)
+        fname = _find_segmented('synapse', idx_int)
+        if fname:
+            snapshot_map['synapse'][idx_int] = f"em_snaps/{fname}"
     print(f"[snapshots] Indexed {len(snapshot_map['synapse'])} synapses [file paths]")
 
     meta_file = os.path.join(results_dir, 'overlap_em_meta.json')
+    overlap_meta_by_idx = {}
+    overlap_expected_zfiles = {}  # idx -> {z_off: filename}
     if os.path.exists(meta_file):
         with open(meta_file, 'r') as mf:
             overlap_meta = json.load(mf)
         for item in overlap_meta:
             idx = int(item['idx'])
-            fname = f"overlap_{idx}_segmented.png"
-            if os.path.exists(os.path.join(em_snap_dir, fname)):
+            overlap_meta_by_idx[idx] = item
+
+            # Center image uses z_offset==0 slice center when present.
+            center_sd = None
+            for sd in item.get('slice_detail', []):
+                if int(sd.get('z_offset', 999999)) == 0:
+                    center_sd = sd
+                    break
+            if center_sd is not None:
+                center_coord = _coord_tag_xyz(center_sd.get('cx', item.get('x', 0)),
+                                              center_sd.get('cy', item.get('y', 0)),
+                                              item.get('z_base_nm', item.get('z', 0)))
+            else:
+                center_coord = _coord_tag_xyz(item.get('x', 0), item.get('y', 0),
+                                              item.get('z_base_nm', item.get('z', 0)))
+
+            fname = _find_segmented('overlap', idx, center_coord)
+            if fname:
                 snapshot_map['overlap'][idx] = f"em_snaps/{fname}"
+
+            # Build expected coordinate-tagged z-stack files from slice_detail.
+            zfiles = {}
+            z_base_nm = item.get('z_base_nm', 0)
+            for sd in item.get('slice_detail', []):
+                rel = int(sd.get('z_offset', 0))
+                coord = _coord_tag_xyz(sd.get('cx', item.get('x', 0)),
+                                       sd.get('cy', item.get('y', 0)),
+                                       z_base_nm + rel * 40)
+                sign = '+' if rel >= 0 else '-'
+                zname = f"overlap_{idx}_{coord}_z{sign}{abs(rel):03d}.png"
+                zfiles[rel] = zname
+            overlap_expected_zfiles[idx] = zfiles
     print(f"[snapshots] Indexed {len(snapshot_map['overlap'])} overlaps [file paths]")
 
-    return snapshot_map
+    # Index z-stack images for dynamic filename resolution in JS.
+    # Supports both legacy names (kind_idx_z+NNN.png) and coordinate-tagged names
+    # (kind_idx_x..._y..._z..._z+NNN.png).
+    zpat = re.compile(r'^(contact|synapse|overlap)_(\d+)(?:_.*)?_z([+-])(\d+)\.png$')
+
+    # Prefer overlap z-stack filenames that exactly match current overlap metadata.
+    for idx, zmap in overlap_expected_zfiles.items():
+        for zoff, fname in zmap.items():
+            if fname in em_files:
+                zstack_map['overlap'].setdefault(idx, {})[zoff] = f"em_snaps/{fname}"
+
+    for fname in em_files:
+        m = zpat.match(fname)
+        if not m:
+            continue
+        kind = m.group(1)
+        idx = int(m.group(2))
+        sign = 1 if m.group(3) == '+' else -1
+        zoff = sign * int(m.group(4))
+        # Preserve preferred overlap mapping if already set from metadata match.
+        if kind == 'overlap' and zoff in zstack_map['overlap'].get(idx, {}):
+            continue
+        zstack_map.setdefault(kind, {}).setdefault(idx, {})[zoff] = f"em_snaps/{fname}"
+
+    print(f"[snapshots] Indexed z-stacks: "
+          f"contact={sum(len(v) for v in zstack_map['contact'].values())}, "
+          f"synapse={sum(len(v) for v in zstack_map['synapse'].values())}, "
+          f"overlap={sum(len(v) for v in zstack_map['overlap'].values())}")
+
+    return snapshot_map, zstack_map
 
 
 # ── HTML generation ───────────────────────────────────────────────────
@@ -5781,6 +5858,7 @@ def generate_html(fig, contacts, synapses, trace_info,
     Template placeholders substituted (all in ``HTML_TEMPLATE``):
 
     * ``{SNAPSHOT_JSON}``          — ``{kind: {idx: 'em_snaps/...png'}}`` paths
+    * ``{SNAPSHOT_ZMAP_JSON}``     — ``{kind: {idx: {z_off: 'em_snaps/...png'}}}``
     * ``{CLUSTER_MAP_JSON}``       — ``{patch_idx: cluster_id}`` mapping
     * ``{NEURON_NAMES_JSON}``      — ordered list of neuron names
     * ``{TRACE_INFO_JSON}``        — ``{name_kind: trace_index}`` lookup
@@ -5797,7 +5875,7 @@ def generate_html(fig, contacts, synapses, trace_info,
     Returns:
         Complete self-contained HTML string (~4 MB typical).
     """
-    snapshot_mapping = index_em_snapshots(
+    snapshot_mapping, zstack_mapping = index_em_snapshots(
         em_snap_dir, contacts, synapses, RESULTS_DIR)
     overlap_table = load_overlap_table(RESULTS_DIR)
 
@@ -5932,7 +6010,9 @@ def generate_html(fig, contacts, synapses, trace_info,
     # ── Populate valid_z from actual files on disk ───────────────
     # overlap_em_meta.json may have empty valid_z; scan em_snaps/ for real files
     import re as _re
-    _ov_file_re = _re.compile(r'^overlap_(\d+)_z([+-])(\d+)\.png$')
+    _ov_file_re = _re.compile(r'^overlap_(\d+)(?:_.*)?_z([+-])(\d+)\.png$')
+    _ov_center_legacy_re = _re.compile(r'^overlap_(\d+)_segmented\.png$')
+    _ov_center_coord_re = _re.compile(r'^overlap_(\d+)_.*_segmented\.png$')
     _ov_files_by_idx = {}  # idx -> set of z-offsets
     if os.path.isdir(em_snap_dir):
         for fname in os.listdir(em_snap_dir):
@@ -5943,12 +6023,11 @@ def generate_html(fig, contacts, synapses, trace_info,
                 offset = int(m.group(3))
                 _ov_files_by_idx.setdefault(ov_idx, set()).add(sign * offset)
             # Also check for center image (z=0)
-            elif fname.startswith('overlap_') and fname.endswith('_segmented.png'):
-                try:
-                    ov_idx = int(fname.split('_')[1])
+            else:
+                m0 = _ov_center_legacy_re.match(fname) or _ov_center_coord_re.match(fname)
+                if m0:
+                    ov_idx = int(m0.group(1))
                     _ov_files_by_idx.setdefault(ov_idx, set()).add(0)
-                except (ValueError, IndexError):
-                    pass
     # Patch overlap_list and overlap_pairs_json with file-derived valid_z
     for ov in overlap_list:
         file_zs = _ov_files_by_idx.get(ov['idx'], set())
@@ -5986,6 +6065,7 @@ def generate_html(fig, contacts, synapses, trace_info,
             contact_cluster_js[p['idx']] = p['cluster_id']
 
     html = html.replace('{SNAPSHOT_JSON}', json.dumps(snapshot_mapping))
+    html = html.replace('{SNAPSHOT_ZMAP_JSON}', json.dumps(zstack_mapping))
     html = html.replace('{CLUSTER_MAP_JSON}', json.dumps(contact_cluster_js))
     html = html.replace('{NEURON_NAMES_JSON}', json.dumps(neuron_list))
     html = html.replace('{TRACE_INFO_JSON}', json.dumps(trace_info))

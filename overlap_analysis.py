@@ -67,6 +67,8 @@ import pickle
 import hashlib
 import traceback
 
+from mesh_config import load_config
+
 # Set Flywire Token (non-interactive-safe)
 # Try env var first, then fall back to saved cave-secret.json
 token = os.environ.get('FLYWIRE_TOKEN')
@@ -81,10 +83,8 @@ if not token:
 
 fafbseg.flywire.set_chunkedgraph_secret(token, overwrite=True)
 
-# Load neuron config from central neurons.json
-import json as _json
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json'), 'r') as _nf:
-    _cfg = _json.load(_nf)
+# Load neuron config from the active profile.
+_cfg, _CONFIG_PATH = load_config()
 neuron_ids = {int(info['id']): name for name, info in _cfg['neurons'].items()}
 N_TOP_PATCHES = _cfg.get('top_patches', 10)
 
@@ -2144,11 +2144,8 @@ def save_individual_patch_data(source, target, contact_area, geo_data, threshold
         print(f"    Saved {len(patch_data)} patches to {filename}")
 
 def generate_target_pairs():
-    """Generate target pairs from neurons.json pairing_rules (no BIPS)"""
-    import json as _json2
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
-    with open(cfg_path, 'r') as _f2:
-        _cfg2 = _json2.load(_f2)
+    """Generate target pairs from the active config pairing_rules (no BIPS)."""
+    _cfg2, _ = load_config()
 
     # Build name→group mapping
     name_to_group = {}

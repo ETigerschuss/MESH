@@ -42,6 +42,39 @@ Run all scripts in order with **`python run_all.py`**, or run individually:
 | **`run_all.py`** | Orchestrator — runs all 4 pipeline scripts in sequence, auto-loads FlyWire token from `cave-secret.json`. |
 | **`requirements.txt`** | Python dependencies. |
 
+### Config profiles
+
+The pipeline supports alternate neuron-config profiles while keeping the current `neurons.json` as the default fallback.
+
+Use a profile directly from `run_all.py`:
+
+```bash
+python run_all.py --config path/to/expanded_neurons.json
+```
+
+Or set it once in the environment:
+
+```bash
+# Windows PowerShell
+$Env:MESH_NEURON_CONFIG = "path\to\expanded_neurons.json"
+python run_all.py
+```
+
+To keep baseline and expanded runs separate, pair the config with a dedicated results directory:
+
+```bash
+python run_all.py --config configs/expanded_neurons.json --results-dir comprehensive_overlap_results_expanded_2026-05-18
+```
+
+If you omit `--config` and `MESH_NEURON_CONFIG`, the pipeline uses the current `neurons.json` exactly as before.
+
+For overlap-only expansion work, start from [configs/expanded_neurons.json](configs/expanded_neurons.json). The intended pattern is:
+
+- Add new cells under `neurons` with group `OVERLAP_ONLY`.
+- Leave `OVERLAP_ONLY` out of `synapse_groups` so those cells stay out of synapse loading.
+- Keep the current 22-cell model unchanged; the viewer's biophysical model is still fixed to that baseline set.
+- Append new cells to `viewer_neurons` only if you want them shown in the HTML viewer.
+
 ## Color Palette
 
 | Group | Color | Hex |

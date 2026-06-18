@@ -1,0 +1,350 @@
+{
+  "_comment": "Expanded MESH config scaffold. Baseline behavior remains available through the repo-root neurons.json. Add new overlap-only cells here instead of editing the baseline in place.",
+  "_workflow_comment": [
+    "1. Copy baseline neurons into this profile unchanged.",
+    "2. Add new cells under neurons with group OVERLAP_ONLY if you want overlap analysis without adding them to synapse loading.",
+    "3. Append those cells to viewer_neurons only if you want them visible in the HTML viewer.",
+    "4. The Tier 1/Tier 2 circuit model remains hardcoded to the original 22 modeled cells, so extra cells stay out of biophysical modeling."
+  ],
+  "neurons": {
+    "MOT_L": {
+      "id": 720575940618519710,
+      "group": "MOT",
+      "color_hex": "#5E3C99",
+      "color_rgb": [94, 60, 153]
+    },
+    "MOT_R": {
+      "id": 720575940630139386,
+      "group": "MOT",
+      "color_hex": "#7C5AB7",
+      "color_rgb": [124, 90, 183]
+    },
+    "MOS_L": {
+      "id": 720575940622361270,
+      "group": "MOS",
+      "color_hex": "#4D9221",
+      "color_rgb": [77, 146, 33]
+    },
+    "MOS_R": {
+      "id": 720575940622168052,
+      "group": "MOS",
+      "color_hex": "#61A635",
+      "color_rgb": [97, 166, 53]
+    },
+    "VS1_L": {
+      "id": 720575940626477498,
+      "group": "VS",
+      "color_hex": "#D14900",
+      "color_rgb": [209, 73, 0]
+    },
+    "VS1_R": {
+      "id": 720575940619878961,
+      "group": "VS",
+      "color_hex": "#E5671E",
+      "color_rgb": [229, 103, 30]
+    },
+    "VS2_L": {
+      "id": 720575940640722851,
+      "group": "VS",
+      "color_hex": "#BD3500",
+      "color_rgb": [189, 53, 0]
+    },
+    "VS2_R": {
+      "id": 720575940613126835,
+      "group": "VS",
+      "color_hex": "#DB530A",
+      "color_rgb": [219, 83, 10]
+    },
+    "VS3_L": {
+      "id": 720575940622831740,
+      "group": "VS",
+      "color_hex": "#C73F00",
+      "color_rgb": [199, 63, 0]
+    },
+    "VS3_R": {
+      "id": 720575940641812699,
+      "group": "VS",
+      "color_hex": "#E05D14",
+      "color_rgb": [224, 93, 20]
+    },
+    "VS4_L": {
+      "id": 720575940624273919,
+      "group": "VS",
+      "color_hex": "#B32B00",
+      "color_rgb": [179, 43, 0]
+    },
+    "VS4_R": {
+      "id": 720575940659799937,
+      "group": "VS",
+      "color_hex": "#EA7128",
+      "color_rgb": [234, 113, 40]
+    },
+    "HSN_L": {
+      "id": 720575940628031249,
+      "group": "HS",
+      "color_hex": "#C51B7D",
+      "color_rgb": [197, 27, 125]
+    },
+    "HSN_R": {
+      "id": 720575940615933919,
+      "group": "HS",
+      "color_hex": "#D9399B",
+      "color_rgb": [217, 57, 155]
+    },
+    "HSE_L": {
+      "id": 720575940629153020,
+      "group": "HS",
+      "color_hex": "#B10769",
+      "color_rgb": [177, 7, 105]
+    },
+    "HSE_R": {
+      "id": 720575940629148007,
+      "group": "HS",
+      "color_hex": "#CF2587",
+      "color_rgb": [207, 37, 135]
+    },
+    "HSS_L": {
+      "id": 720575940622312965,
+      "group": "HS",
+      "color_hex": "#BB1173",
+      "color_rgb": [187, 17, 115]
+    },
+    "HSS_R": {
+      "id": 720575940628743496,
+      "group": "HS",
+      "color_hex": "#D92F91",
+      "color_rgb": [217, 47, 145]
+    },
+    "BIPS_L": {
+      "id": 720575940622581173,
+      "group": "BIPS",
+      "color_hex": "#00897B",
+      "color_rgb": [0, 137, 123]
+    },
+    "BIPS_R": {
+      "id": 720575940623618708,
+      "group": "BIPS",
+      "color_hex": "#26A69A",
+      "color_rgb": [38, 166, 154]
+    },
+    "H2_L": {
+      "id": 720575940631999685,
+      "group": "H2",
+      "color_hex": "#F9A825",
+      "color_rgb": [249, 168, 37]
+    },
+    "H2_R": {
+      "id": 720575940632427603,
+      "group": "H2",
+      "color_hex": "#FDD835",
+      "color_rgb": [253, 216, 53]
+    },
+    "CB1582_L_1": {
+      "id": 720575940624378556,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#EC407A",
+      "color_rgb": [236, 64, 122]
+    },
+    "CB1582_L_2": {
+      "id": 720575940614581502,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#F06292",
+      "color_rgb": [240, 98, 146]
+    },
+    "CB1582_R_1": {
+      "id": 720575940635608312,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#EC407A",
+      "color_rgb": [236, 64, 122]
+    },
+    "CB1582_R_2": {
+      "id": 720575940623253235,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#F06292",
+      "color_rgb": [240, 98, 146]
+    },
+    "JO-F_L_1": {
+      "id": 720575940622357740,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "JO-F_L_2": {
+      "id": 720575940624496280,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "JO-F_L_3": {
+      "id": 720575940619800001,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "GNG.1885": {
+      "id": 720575940617613392,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "GNG.2262": {
+      "id": 720575940626200457,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "GNG.1793": {
+      "id": 720575940631406667,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "GNG.2174": {
+      "id": 720575940609547549,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "GNG.2084": {
+      "id": 720575940632361111,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "GNG.2086": {
+      "id": 720575940630962280,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "GNG.2002": {
+      "id": 720575940627327938,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "GNG.2344": {
+      "id": 720575940604781158,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#00ACC1",
+      "color_rgb": [0, 172, 193]
+    },
+    "JO-F_R_1": {
+      "id": 720575940621593972,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#26C6DA",
+      "color_rgb": [38, 198, 218]
+    },
+    "JO-F_R_2": {
+      "id": 720575940630530263,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#26C6DA",
+      "color_rgb": [38, 198, 218]
+    },
+    "JO-FDA_R": {
+      "id": 720575940638142953,
+      "group": "OVERLAP_ONLY",
+      "color_hex": "#FF8F00",
+      "color_rgb": [255, 143, 0]
+    }
+  },
+  "_overlap_only_group_comment": "Use group OVERLAP_ONLY for additional cells you want in overlap analysis but excluded from synapse loading.",
+  "_new_cell_example": {
+    "name": "CB0901_L",
+    "id": 720575940000000000,
+    "group": "OVERLAP_ONLY",
+    "color_hex": "#9E9E9E",
+    "color_rgb": [158, 158, 158]
+  },
+  "synapse_groups": [
+    "MOT",
+    "MOS",
+    "VS",
+    "HS",
+    "BIPS",
+    "H2"
+  ],
+  "_synapse_groups_comment": "Keep OVERLAP_ONLY out of this list if you want the new cells to stay overlap-only.",
+  "top_patches": 10,
+  "_top_patches_comment": "Number of top (largest) contact patches to extract per pair. EM snapshots are generated for each.",
+  "viewer_neurons": [
+    "MOT_L",
+    "MOT_R",
+    "MOS_L",
+    "MOS_R",
+    "VS1_L",
+    "VS1_R",
+    "VS2_L",
+    "VS2_R",
+    "VS3_L",
+    "VS3_R",
+    "VS4_L",
+    "VS4_R",
+    "HSN_L",
+    "HSN_R",
+    "HSE_L",
+    "HSE_R",
+    "HSS_L",
+    "HSS_R",
+    "BIPS_L",
+    "BIPS_R",
+    "H2_L",
+    "H2_R",
+    "CB1582_L_1",
+    "CB1582_L_2",
+    "CB1582_R_1",
+    "CB1582_R_2",
+    "JO-F_L_1",
+    "JO-F_L_2",
+    "JO-F_L_3",
+    "GNG.1885",
+    "GNG.2262",
+    "GNG.1793",
+    "GNG.2174",
+    "GNG.2084",
+    "GNG.2086",
+    "GNG.2002",
+    "GNG.2344",
+    "JO-F_R_1",
+    "JO-F_R_2",
+    "JO-FDA_R"
+  ],
+  "_viewer_neurons_comment": "Append any new overlap-only cells here only if you want them displayed in the EM viewer sidebar.",
+  "model_neurons": [
+    "MOT_L",
+    "MOT_R",
+    "MOS_L",
+    "MOS_R",
+    "VS1_L",
+    "VS1_R",
+    "VS2_L",
+    "VS2_R",
+    "VS3_L",
+    "VS3_R",
+    "VS4_L",
+    "VS4_R",
+    "HSN_L",
+    "HSN_R",
+    "HSE_L",
+    "HSE_R",
+    "HSS_L",
+    "HSS_R",
+    "BIPS_L",
+    "BIPS_R",
+    "H2_L",
+    "H2_R"
+  ],
+  "_model_neurons_comment": "Documentation-only list of the currently modeled cells. The biophysical model remains fixed to these 22 cells in skeleton_em_viewer.py.",
+  "face_decimation_nm": 80,
+  "_face_decimation_nm_comment": "Overlap face vertex rounding step (nm) for slight decimation in the viewer. 0 = no decimation.",
+  "pairing_rules": {
+    "_comment": "Include OVERLAP_ONLY here so any new cells in that group are analyzed geometrically without entering synapse loading.",
+    "rules": [
+      {
+        "source": ["MOT", "MOS", "VS", "HS", "BIPS", "H2", "OVERLAP_ONLY"],
+        "target": ["MOT", "MOS", "VS", "HS", "BIPS", "H2", "OVERLAP_ONLY"],
+        "bidirectional": true
+      }
+    ]
+  }
+}
