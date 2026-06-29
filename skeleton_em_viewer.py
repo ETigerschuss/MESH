@@ -135,6 +135,23 @@ VIEWER_NEURONS = _cfg.get('viewer_neurons', sorted(NEURON_CFG.keys()))
 _synapse_groups = set(_cfg.get('synapse_groups', []))
 SYNAPSE_NEURONS = [n for n, info in NEURON_CFG.items() if info['group'] in _synapse_groups]
 
+# ── Publication: pre-selected putative gap-junction sites ──────────────
+# User-curated EM locations, marked on load with the same green marker style as
+# the interactive putative gap junctions. Coordinates are FlyWire VOXEL coords.
+# Z uses 80 nm/voxel (a cross-dataset factor — 40 nm placed sites at half the
+# correct depth, ~28 um from the MOT_R/MOS_R contact; 80 nm lands ~10 um from
+# it); X/Y use 4 nm. nm = voxel * (4, 4, 80). Add further sites to the list.
+PRESELECTED_GJ_VOXEL_NM = (4, 4, 80)
+PRESELECTED_GJ_SITES = [
+    {"voxel": (158581, 72226, 2189), "label": "Putative GJ 1 (MOT_R / MOS_R region)"},
+    # add more: {"voxel": (x, y, z), "label": "..."},
+]
+
+
+def _preselected_gj_nm(voxel):
+    """FlyWire voxel -> nm using the pre-selected-site voxel size (4, 4, 80)."""
+    return tuple(int(v) * r for v, r in zip(voxel, PRESELECTED_GJ_VOXEL_NM))
+
 # Inhibitory pairs used for synapse color/label classification.
 INH_PAIRS = frozenset([
     ('VS1_L', 'VS2_L'),
@@ -451,6 +468,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 <div class="modal-tab" data-tab="connectivity">Connectivity</div>
                 <div class="modal-tab" data-tab="circuit">Circuit Model (Tier 1)</div>
                 <div class="modal-tab" data-tab="mc">Multi-Compartment (Tier 2)</div>
+                <div class="modal-tab" data-tab="summary">Overlap Summary</div>
             </div>
             <div class="modal-tab-content active" id="tabOverlaps">
                 <div style="display:flex;flex-direction:column;gap:10px;">
@@ -504,6 +522,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <div class="modal-tab-content" id="tabMC">
                 <div id="mcContainer" style="padding:8px;"></div>
             </div>
+            <div class="modal-tab-content" id="tabSummary">
+                <div id="summaryContainer" style="padding:12px;overflow:auto;"></div>
+            </div>
         </div>
     </div>
 
@@ -526,6 +547,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const overlapPairs  = {OVERLAP_PAIRS_JSON};
         const overlapPairFaces = {OVERLAP_PAIR_FACES_JSON};
         const neuronColors  = {NEURON_COLORS_JSON};
+        // Keep the hardcoded Tier-1 model cells colored even if the active config
+        // omits them (the 26-cell publication set drops BIPS/H2 from the config,
+        // but the biophysical model still references them internally).
+        (function ensureModelColors() {
+            const fb = { BIPS_L:'#00897B', BIPS_R:'#26A69A', H2_L:'#F9A825', H2_R:'#FDD835' };
+            for (const k in fb) if (!(k in neuronColors)) neuronColors[k] = fb[k];
+        })();
         const deletedItems = [];  // track deleted contacts + overlap slices
 
         // ── DOM refs ────────────────────────────────────────────────
@@ -1843,13 +1871,87 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             rebuildPutativeGJTrace();
         }
 
+        // ── Overlap Summary matrix (publication panel j) ─────────────
+        // Binary MOT/MOS x HS/VS overlap. Rows = MOS/MOT x right/left;
+        // columns = cell TYPE (L/R collapsed). A cell is filled in the
+        // motor color when the row's motor neuron overlaps the same-
+        // hemisphere LPTC of that column type. Mirrors reduced_matrix.py.
+        function renderSummaryMatrix() {
+            const C_MOT = '#5E3C99', C_MOS = '#4D9221';
+            const C_HS = '#C51B7D', C_VS14 = '#D14900', C_VS58 = '#007F5F';
+            const MIN_AREA = 0.5;
+            const rows = [
+                { motor: 'MOS_R', color: C_MOS, label: 'MOS', hemi: 'right' },
+                { motor: 'MOT_R', color: C_MOT, label: 'MOT', hemi: 'right' },
+                { motor: 'MOS_L', color: C_MOS, label: 'MOS', hemi: 'left' },
+                { motor: 'MOT_L', color: C_MOT, label: 'MOT', hemi: 'left' },
+            ];
+            const cols = [
+                { t: 'HSN', g: 'HS', c: C_HS }, { t: 'HSS', g: 'HS', c: C_HS }, { t: 'HSE', g: 'HS', c: C_HS },
+                { t: 'VS1', g: 'VS1-4', c: C_VS14 }, { t: 'VS2', g: 'VS1-4', c: C_VS14 },
+                { t: 'VS3', g: 'VS1-4', c: C_VS14 }, { t: 'VS4', g: 'VS1-4', c: C_VS14 },
+                { t: 'VS5', g: 'VS5-8', c: C_VS58 }, { t: 'VS6', g: 'VS5-8', c: C_VS58 },
+                { t: 'VS7', g: 'VS5-8', c: C_VS58 }, { t: 'VS8', g: 'VS5-8', c: C_VS58 },
+            ];
+            const area = {};
+            overlapTable.forEach(r => {
+                const k = r.source + '|' + r.target;
+                if (area[k] === undefined || r.area > area[k]) area[k] = r.area;
+            });
+            function ov(a, b) {
+                return Math.max(area[a + '|' + b] || 0, area[b + '|' + a] || 0) >= MIN_AREA;
+            }
+            const cs = 34, x0 = 72, y0 = 58;
+            const W = x0 + cols.length * cs + 90;
+            const H = y0 + rows.length * cs + 70;
+            let svg = '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg" style="background:#fff;font-family:sans-serif;">';
+            // column-group color bars + group labels
+            let j = 0;
+            while (j < cols.length) {
+                const g = cols[j].g; let k = j;
+                while (k < cols.length && cols[k].g === g) k++;
+                const bx = x0 + j * cs, bw = (k - j) * cs;
+                svg += '<rect x="' + bx + '" y="' + (y0 - 20) + '" width="' + bw + '" height="13" fill="' + cols[j].c + '"/>';
+                svg += '<text x="' + (bx + bw / 2) + '" y="' + (y0 - 25) + '" text-anchor="middle" font-size="12" font-weight="bold" fill="' + cols[j].c + '">' + g + '</text>';
+                j = k;
+            }
+            // cells + row labels
+            rows.forEach((row, i) => {
+                cols.forEach((col, jj) => {
+                    const x = x0 + jj * cs, y = y0 + i * cs;
+                    const filled = ov(row.motor, col.t + (row.hemi === 'right' ? '_R' : '_L'));
+                    svg += '<rect x="' + x + '" y="' + y + '" width="' + cs + '" height="' + cs + '" fill="' + (filled ? row.color : '#ffffff') + '" stroke="#444" stroke-width="0.8"/>';
+                });
+                svg += '<text x="' + (x0 - 8) + '" y="' + (y0 + i * cs + cs / 2 + 4) + '" text-anchor="end" font-size="13" font-weight="bold" fill="' + row.color + '">' + row.label + '</text>';
+            });
+            // column labels (rotated, tinted by group)
+            cols.forEach((col, jj) => {
+                const cx = x0 + jj * cs + cs / 2, cy = y0 + rows.length * cs + 6;
+                svg += '<text x="' + cx + '" y="' + cy + '" font-size="11" fill="' + col.c + '" transform="rotate(90 ' + cx + ' ' + cy + ')">' + col.t + '</text>';
+            });
+            // right-side hemisphere brackets
+            const bxr = x0 + cols.length * cs + 10;
+            [['right', 0], ['left', 2]].forEach(pair => {
+                const top = y0 + pair[1] * cs + 3, bot = y0 + (pair[1] + 2) * cs - 3;
+                svg += '<path d="M' + bxr + ' ' + top + ' h8 V' + bot + ' h-8" fill="none" stroke="#222" stroke-width="1.4"/>';
+                const mid = (top + bot) / 2;
+                svg += '<text x="' + (bxr + 24) + '" y="' + (mid + 4) + '" text-anchor="middle" font-size="12" fill="#111" transform="rotate(90 ' + (bxr + 24) + ' ' + mid + ')">' + pair[0] + '</text>';
+            });
+            svg += '</svg>';
+            const caption = '<div style="margin-top:10px;color:#333;font-size:11px;max-width:560px;line-height:1.4;">'
+                + '<b>Overlap summary (publication panel).</b> Filled = the motor neuron (row) overlaps the '
+                + 'same-hemisphere LPTC of that type (column) with contact area &ge; ' + MIN_AREA + ' &micro;m&sup2;. '
+                + 'MOS rows in MOS color, MOT rows in MOT color; VS5-8 is the control group.</div>';
+            document.getElementById('summaryContainer').innerHTML = svg + caption;
+        }
+
         // ── Matrix modal ────────────────────────────────────────────
         // LAZY TAB RENDERING: only render a tab's content when it is first
         // clicked (or when data changes).  The three static-data tabs
         // (overlaps, gapjunctions, connectivity) are rendered once on first
         // open; Tier 1 / Tier 2 circuit tabs re-render every visit because
         // they contain live simulation state.
-        const _tabRendered = { overlaps: false, gapjunctions: false, connectivity: false };
+        const _tabRendered = { overlaps: false, gapjunctions: false, connectivity: false, summary: false };
 
         btnMatrix.addEventListener('click', function() {
             // Always refresh the default (overlaps) tab on open; the others
@@ -1877,6 +1979,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             connectivity: { el: 'tabConnectivity',   title: 'Connectivity Matrix (GJ + Chemical Synapses)' },
             circuit:      { el: 'tabCircuit',         title: 'Tier 1 Circuit Model' },
             mc:           { el: 'tabMC',              title: 'Multi-Compartment Model (Tier 2)' },
+            summary:      { el: 'tabSummary',         title: 'Overlap Summary (MOT/MOS × HS/VS)' },
         };
         document.querySelectorAll('.modal-tab').forEach(tab => {
             tab.addEventListener('click', function() {
@@ -1902,6 +2005,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     }
                     if (target === 'circuit') renderCircuitModel();
                     if (target === 'mc') renderMCModel();
+                    if (target === 'summary' && !_tabRendered.summary) {
+                        renderSummaryMatrix();
+                        _tabRendered.summary = true;
+                    }
                 }
             });
         });
@@ -5696,6 +5803,30 @@ def build_figure(mesh_dir):
     ))
     print(f"  [gap_junctions] marker trace added")
 
+    # ── 7b. Pre-selected putative gap-junction sites (always visible) ──
+    # Curated EM locations, marked on load with the same green marker as the
+    # interactive putative gap junctions (which are gated behind checkboxes and
+    # stay hidden until enabled). Add sites via PRESELECTED_GJ_SITES above.
+    trace_info['_preselected_gj'] = len(traces)
+    _pg_x, _pg_y, _pg_z, _pg_txt = [], [], [], []
+    for _site in PRESELECTED_GJ_SITES:
+        _nm = _preselected_gj_nm(_site["voxel"])
+        _pg_x.append(_nm[0]); _pg_y.append(_nm[1]); _pg_z.append(_nm[2])
+        _pg_txt.append('{}<br>voxel {} @ {} nm/vox = {} nm'.format(
+            _site["label"], _site["voxel"], PRESELECTED_GJ_VOXEL_NM, _nm))
+    traces.append(go.Scatter3d(
+        x=_pg_x, y=_pg_y, z=_pg_z,
+        mode='markers',
+        name='Pre-selected putative GJ',
+        visible=True,
+        marker=dict(size=6, color='#39FF14', symbol='circle',
+                    line=dict(color='#0a3d0a', width=1), opacity=1.0),
+        hovertext=_pg_txt,
+        hovertemplate='%{hovertext}<extra></extra>',
+        showlegend=True,
+    ))
+    print(f"  [preselected_gj] {len(PRESELECTED_GJ_SITES)} pre-selected GJ site(s) marked")
+
     fig = go.Figure(data=traces)
     fig.update_layout(
         scene=dict(
@@ -5723,7 +5854,8 @@ def index_em_snapshots(em_snap_dir, contacts, synapses, results_dir):
     em_files = os.listdir(em_snap_dir) if os.path.isdir(em_snap_dir) else []
 
     def _coord_tag_xyz(x, y, z):
-        return f"x{int(round(x))}_y{int(round(y))}_z{int(round(z))}"
+        # Voxel coordinates at 4x4x40 nm, matching generate_em_stacks._coord_tag
+        return f"vx{int(round(x/4.0))}_vy{int(round(y/4.0))}_vz{int(round(z/40.0))}"
 
     def _find_segmented(kind, idx, expected_coord=None):
         idx = int(idx)

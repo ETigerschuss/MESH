@@ -673,6 +673,29 @@ def _build_overlay_toggle_js(syn_idx: list[int], mid_idx: list[int], cen_idx: li
 
 
 def _build_color_map(valid_names):
+    """Color map for neuron meshes and overlap patches.
+
+    Publication behavior: prefer each neuron's explicit ``color_hex`` from the
+    active config (so the VS1-4 vs VS5-8 control split and all group colors come
+    straight from the config, e.g. publication_neurons.json). Any name without an
+    explicit config color falls back to the computed group shades below, which
+    keeps older configs working unchanged.
+    """
+    cfg_neurons = _cfg.get('neurons', {})
+    color_map = {}
+    missing = []
+    for name in valid_names:
+        info = cfg_neurons.get(name)
+        if info and info.get('color_hex'):
+            color_map[name] = info['color_hex']
+        else:
+            missing.append(name)
+    if missing:
+        color_map.update(_computed_group_shades(missing))
+    return color_map
+
+
+def _computed_group_shades(valid_names):
     """Assign group-based colors (L/R share the same hue):
     MOS: #4D9221, VS: #D14900, MOT: #5E3C99, HS: #C51B7D, BIPS: black.
     HS shades split across HSN/HSE/HSS; VS shades across VS1-4; others share their base.
@@ -2501,6 +2524,9 @@ def create_advanced_interactive_viz(matrices, valid_names, thresholds_microns):
         yaxis_title='Source Neuron',
         width=900,
         height=800,
+        paper_bgcolor='white',
+        plot_bgcolor='white',
+        font=dict(color='#111111'),
         updatemenus=[
             dict(
                 buttons=threshold_buttons,

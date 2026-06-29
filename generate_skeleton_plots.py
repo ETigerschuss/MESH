@@ -176,10 +176,13 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
         neuron_faces = scenario_faces[scenario_faces['neuron_a'] == source_name]
         print(f"    Overlap faces: {len(neuron_faces)}")
         
-        # Extract overlap triangles - detect degenerate ones (all 3 vertices identical)
-        overlap_triangles = []
-        overlap_centroids = []  # fallback: scatter points for degenerate faces
+        # Extract overlap triangles, grouped by PARTNER neuron (neuron_b) so each
+        # overlap patch is drawn in its partner's color. Degenerate faces (all 3
+        # vertices identical) fall back to a centroid scatter point.
+        overlap_tris_by_target = {}    # target -> [[v1,v2,v3], ...]
+        overlap_cents_by_target = {}   # target -> [[cx,cy,cz], ...]
         for _, row in neuron_faces.iterrows():
+            tgt = row['neuron_b']
             v1 = [row['vertex1_x'], row['vertex1_y'], row['vertex1_z']]
             v2 = [row['vertex2_x'], row['vertex2_y'], row['vertex2_z']]
             v3 = [row['vertex3_x'], row['vertex3_y'], row['vertex3_z']]
@@ -189,9 +192,11 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
                 cx = row.get('centroid_x', v1[0])
                 cy = row.get('centroid_y', v1[1])
                 cz = row.get('centroid_z', v1[2])
-                overlap_centroids.append([cx, cy, cz])
+                overlap_cents_by_target.setdefault(tgt, []).append([cx, cy, cz])
             else:
-                overlap_triangles.append([v1, v2, v3])
+                overlap_tris_by_target.setdefault(tgt, []).append([v1, v2, v3])
+        n_tris = sum(len(v) for v in overlap_tris_by_target.values())
+        n_cents = sum(len(v) for v in overlap_cents_by_target.values())
         
         # Get neuron mesh
         neuron_mesh = neurons[source_name]
@@ -229,37 +234,44 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
                 if isinstance(ax, np.ndarray):
                     ax = ax[0]
             
-                # Project overlap triangles to 2D
-                overlap_triangles_2d = []
-                for triangle in overlap_triangles:
-                    projected = [[v[x_idx], v[y_idx]] for v in triangle]
-                    overlap_triangles_2d.append(projected)
+                # Draw each PARTNER's overlap in its color, EXAGGERATED so it
+                # pops: a big translucent glow halo + a saturated body underneath,
+                # with the crisp filled patch on top. Dense overlaps bloom into
+                # bold colored blobs.
+                legend_targets = set()
+                for tgt, tris in overlap_tris_by_target.items():
+                    col = get_color(tgt)
+                    tris_2d = [[[v[x_idx], v[y_idx]] for v in tri] for tri in tris]
+                    gx = [(tri[0][x_idx] + tri[1][x_idx] + tri[2][x_idx]) / 3.0 for tri in tris]
+                    gy = [(tri[0][y_idx] + tri[1][y_idx] + tri[2][y_idx]) / 3.0 for tri in tris]
+                    ax.scatter(gx, gy, s=340, c=col, alpha=0.20, edgecolors='none', zorder=98)
+                    ax.scatter(gx, gy, s=120, c=col, alpha=0.50, edgecolors='none', zorder=99)
+                    ax.add_collection(PolyCollection(
+                        tris_2d, alpha=1.0, facecolors=col, edgecolors=col,
+                        linewidths=0.6, zorder=100))
+                    legend_targets.add(tgt)
+                for tgt, cents in overlap_cents_by_target.items():
+                    col = get_color(tgt)
+                    cx = [c[x_idx] for c in cents]; cy = [c[y_idx] for c in cents]
+                    ax.scatter(cx, cy, s=340, c=col, alpha=0.20, edgecolors='none', zorder=98)
+                    ax.scatter(cx, cy, s=120, c=col, alpha=0.50, edgecolors='none', zorder=99)
+                    ax.scatter(cx, cy, s=55, c=col, alpha=1.0, edgecolors='#333333',
+                               linewidths=0.5, zorder=101, marker='o')
+                    legend_targets.add(tgt)
+                # Legend: one swatch per partner color present (HS / VS1-4 / VS5-8)
+                _grp_label = {"VS": "VS1-4", "VS5_8": "VS5-8", "HS": "HS",
+                              "MOT": "MOT", "MOS": "MOS"}
+                _seen = {}  # color -> label
+                for tgt in legend_targets:
+                    grp = _cfg['neurons'].get(tgt, {}).get('group', '')
+                    _seen.setdefault(get_color(tgt), _grp_label.get(grp, grp or tgt))
+                if _seen:
+                    from matplotlib.patches import Patch as _Patch
+                    ax.legend(handles=[_Patch(facecolor=c, label=l) for c, l in _seen.items()],
+                              loc='upper right', fontsize=8, frameon=False,
+                              title='Overlap partner')
 
-                # Project degenerate centroids to 2D
-                centroid_xs = [c[x_idx] for c in overlap_centroids]
-                centroid_ys = [c[y_idx] for c in overlap_centroids]
-
-                # Add overlap surfaces (real triangles)
-                if overlap_triangles_2d:
-                    overlap_collection = PolyCollection(
-                        overlap_triangles_2d,
-                        alpha=1.0,
-                        facecolors='#FF0030',
-                        edgecolors='#CC0020',
-                        linewidths=0.3,
-                        zorder=100
-                    )
-                    ax.add_collection(overlap_collection)
-
-                # Add overlap centroids as scatter points (degenerate/recycled faces)
-                if centroid_xs:
-                    ax.scatter(centroid_xs, centroid_ys,
-                               c='#FF0030', s=30, alpha=1.0,
-                               edgecolors='#CC0020', linewidths=0.5,
-                               zorder=100, marker='o',
-                               )
-
-                overlap_label = f'{len(overlap_triangles)} faces + {len(overlap_centroids)} centroids'            # Calculate axis limits
+                overlap_label = f'{n_tris} faces + {n_cents} centroids'            # Calculate axis limits
                 neuron_coords_x = neuron_mesh.vertices[:, x_idx]
                 neuron_coords_y = neuron_mesh.vertices[:, y_idx]
             

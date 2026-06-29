@@ -25,6 +25,14 @@ if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 if sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+# Force UTF-8 in the child scripts too. When run_all's output is redirected to a
+# file/pipe, a child's stdout defaults to cp1252 on Windows and crashes on
+# Unicode like '→' (used in overlap pair keys) or 'µm²'. PYTHONUTF8 is read at
+# each child interpreter's startup, so set it before launching subprocesses.
+os.environ['PYTHONUTF8'] = '1'
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+
 from pathlib import Path
 
 from mesh_config import CONFIG_ENV_VAR, config_is_default, load_config, resolve_config_path
@@ -53,8 +61,10 @@ def _ensure_flywire_token():
 
 SCRIPTS = [
     ("overlap_analysis.py",        "Overlap analysis + 3D figures"),
+    ("reduced_matrix.py",          "Reduced MOT/MOS x HS/VS overlap matrix"),
     ("generate_skeleton_plots.py", "Skeleton plots"),
     ("generate_em_stacks.py",      "EM stack montages (contacts + synapses + overlaps)"),
+    ("generate_gj_figures.py",     "Putative gap-junction composite figures (MOT/MOS x partners)"),
     ("skeleton_em_viewer.py",      "Final comprehensive EM viewer (runs last)"),
 ]
 

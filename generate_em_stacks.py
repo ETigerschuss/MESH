@@ -160,12 +160,19 @@ def resolve_results_dir():
     return os.path.join(base, 'comprehensive_overlap_results')
 
 
+# FlyWire / Neuroglancer reference voxel size (nm). EM-snapshot filename
+# coordinate tags use these voxel units so the numbers match what you read in
+# Neuroglancer (e.g. a putative GJ pinpointed at voxel x,y,z @ 4x4x40 nm).
+COORD_VOXEL_NM = (4.0, 4.0, 40.0)
+
+
 def _coord_tag(center_nm):
-    """Compact coordinate suffix for filenames (nm, integer-rounded)."""
-    cx = int(round(center_nm[0]))
-    cy = int(round(center_nm[1]))
-    cz = int(round(center_nm[2]))
-    return f"x{cx}_y{cy}_z{cz}"
+    """Compact voxel-coordinate suffix for filenames at 4x4x40 nm
+    (matches the coordinates shown in Neuroglancer)."""
+    vx = int(round(center_nm[0] / COORD_VOXEL_NM[0]))
+    vy = int(round(center_nm[1] / COORD_VOXEL_NM[1]))
+    vz = int(round(center_nm[2] / COORD_VOXEL_NM[2]))
+    return f"vx{vx}_vy{vy}_vz{vz}"
 
 
 # ─── EM Snapshot Creator ─────────────────────────────────────────────
