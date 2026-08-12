@@ -61,12 +61,16 @@ def _ensure_flywire_token():
 
 SCRIPTS = [
     ("overlap_analysis.py",        "Overlap analysis + 3D figures"),
+    ("validate_overlaps.py",       "Seg-adjacency validation (confined areas + real-contact patches)"),
     ("reduced_matrix.py",          "Reduced MOT/MOS x HS/VS overlap matrix"),
     ("generate_skeleton_plots.py", "Skeleton plots"),
     ("generate_em_stacks.py",      "EM stack montages (contacts + synapses + overlaps)"),
     ("generate_gj_figures.py",     "Putative gap-junction composite figures (MOT/MOS x partners)"),
     ("skeleton_em_viewer.py",      "Final comprehensive EM viewer (runs last)"),
 ]
+# NOTE: generate_gj_figures_extended.py is a manual, per-coordinate tool
+# (usage: python generate_gj_figures_extended.py <vx> <vy> <vz>), so it is not
+# part of the batch pipeline.
 
 
 def _find_latest_results():

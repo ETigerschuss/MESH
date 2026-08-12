@@ -136,21 +136,101 @@ _synapse_groups = set(_cfg.get('synapse_groups', []))
 SYNAPSE_NEURONS = [n for n, info in NEURON_CFG.items() if info['group'] in _synapse_groups]
 
 # ── Publication: pre-selected putative gap-junction sites ──────────────
-# User-curated EM locations, marked on load with the same green marker style as
-# the interactive putative gap junctions. Coordinates are FlyWire VOXEL coords.
-# Z uses 80 nm/voxel (a cross-dataset factor — 40 nm placed sites at half the
-# correct depth, ~28 um from the MOT_R/MOS_R contact; 80 nm lands ~10 um from
-# it); X/Y use 4 nm. nm = voxel * (4, 4, 80). Add further sites to the list.
-PRESELECTED_GJ_VOXEL_NM = (4, 4, 80)
-PRESELECTED_GJ_SITES = [
-    {"voxel": (158581, 72226, 2189), "label": "Putative GJ 1 (MOT_R / MOS_R region)"},
-    # add more: {"voxel": (x, y, z), "label": "..."},
-]
+# Marked on load with the green putative-GJ marker style. The confirmed site is
+# the MOT_R <-> HSN_R junction (FlyWire voxel 154698, 66954, 5068 @ 4x4x40 nm =
+# the nm below). Additional curated example sites are loaded from the GJ figure
+# pipeline output (gj_figures/gj_sites.json) when present.
+CONFIRMED_GJ_NM = (618792, 267816, 202720)   # MOT_R <-> HSN_R (confirmed)
 
 
-def _preselected_gj_nm(voxel):
-    """FlyWire voxel -> nm using the pre-selected-site voxel size (4, 4, 80)."""
-    return tuple(int(v) * r for v, r in zip(voxel, PRESELECTED_GJ_VOXEL_NM))
+# Minimum spacing between distinct putative-GJ markers of the same pair (nm).
+# Collapses the many small validated patches of one contact into a few
+# representative sites so the viewer isn't flooded with near-duplicate markers.
+_GJ_MARKER_SEP_NM = 3000.0
+
+
+def _load_preselected_gj(results_dir):
+    """[(x_nm, y_nm, z_nm, label), ...]: the confirmed GJ first (drawn larger),
+    then putative gap-junction sites.
+
+    Preferred source is ``gj_candidates.csv`` (Phase A): seg-validated
+    motor<->LPTC appositions from which contacts coinciding with an annotated
+    chemical synapse have been removed, i.e. the chemically-filtered
+    gap-junction candidates, already deduplicated to distinct sites and ranked
+    by area. Falls back to ``validated_patches.csv`` (all real appositions,
+    deduplicated here) and then to the motor<->LPTC subset of
+    ``overlap_em_meta.json``. Motor/descending neurons never enter the lobula
+    plate, so all of these lie on the LPTC *axon* where MOT/MOS gap junctions
+    are expected."""
+    import csv
+    sites = [(CONFIRMED_GJ_NM[0], CONFIRMED_GJ_NM[1], CONFIRMED_GJ_NM[2],
+              "Confirmed GJ (MOT_R <-> HSN_R)")]
+
+    def _is_motor_partner(a, b):
+        names = (str(a), str(b))
+        has_motor = any(n.startswith(("MOT", "MOS")) for n in names)
+        has_lptc = any(n.startswith(("HS", "VS")) for n in names)
+        return has_motor and has_lptc
+
+    # Preferred: chemically-filtered candidates from phase_a_gj_candidates.py.
+    cand = os.path.join(results_dir, "gj_candidates.csv")
+    if os.path.exists(cand):
+        try:
+            rows = list(csv.DictReader(open(cand, newline="")))
+            rows.sort(key=lambda r: -float(r.get("area_um2", 0.0)))
+            for r in rows:
+                a, b = r.get("neuron_a"), r.get("neuron_b")
+                chem = float(r.get("nearest_chem_nm", "inf") or "inf")
+                tag = "no chem synapse" if chem == float("inf") else \
+                      "chem {:.1f} um".format(chem / 1000.0)
+                sites.append((float(r["x"]), float(r["y"]), float(r["z"]),
+                              "{} <-> {} (GJ candidate; area {} um2; {})".format(
+                                  a, b, r.get("area_um2", "?"), tag)))
+            return sites
+        except Exception:
+            pass
+
+    val = os.path.join(results_dir, "validated_patches.csv")
+    if os.path.exists(val):
+        try:
+            by_pair = {}
+            with open(val, newline="") as _f:
+                for row in csv.DictReader(_f):
+                    a, b = row.get("neuron_a"), row.get("neuron_b")
+                    if not _is_motor_partner(a, b):
+                        continue
+                    key = tuple(sorted((a, b)))
+                    by_pair.setdefault(key, []).append(
+                        (float(row["x"]), float(row["y"]), float(row["z"]),
+                         float(row.get("area_um2", 0.0))))
+            for (a, b), pts in by_pair.items():
+                pts.sort(key=lambda p: -p[3])          # largest patch first
+                kept = []
+                for x, y, z, area in pts:
+                    if all((x - kx) ** 2 + (y - ky) ** 2 + (z - kz) ** 2
+                           >= _GJ_MARKER_SEP_NM ** 2 for kx, ky, kz in kept):
+                        kept.append((x, y, z))
+                        sites.append((x, y, z, "{} <-> {} (axonal)".format(a, b)))
+            return sites
+        except Exception:
+            pass
+
+    # Fallback: motor<->LPTC subset of the overlap metadata (still axonal).
+    meta = os.path.join(results_dir, "overlap_em_meta.json")
+    if os.path.exists(meta):
+        try:
+            with open(meta) as _f:
+                for it in json.load(_f):
+                    if not _is_motor_partner(it.get("source"), it.get("target")):
+                        continue
+                    x, y = it.get("x"), it.get("y")
+                    z = it.get("z_base_nm", it.get("z"))
+                    if x is not None and y is not None and z is not None:
+                        sites.append((x, y, z, "{} <-> {} (overlap {})".format(
+                            it.get("source", "?"), it.get("target", "?"), it.get("idx", ""))))
+        except Exception:
+            pass
+    return sites
 
 # Inhibitory pairs used for synapse color/label classification.
 INH_PAIRS = frozenset([
@@ -300,6 +380,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             width: 100%; height: 100%;
             object-fit: contain; display: block;
         }
+        #measureCanvas {
+            position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 6;
+        }
+        #measureCanvas.active { pointer-events: auto; cursor: crosshair; }
+        .measure-readout {
+            color: #7fe3c8; font-size: 11px; font-family: 'Consolas', monospace;
+            flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        #btnMeasure.active { background: #2E7D32; border-color: #66BB6A; }
         #emPlaceholder { color: #555; font-size: 13px; text-align: center; }
         .em-controls { background: #1f1f1f; border-top: 1px solid #444; }
         .control-row {
@@ -423,6 +513,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <div class="deleted-banner" id="deletedBanner">&#10007; DELETED &#8212; this contact has been removed</div>
             <div class="em-display">
                 <img id="emImage" style="display:none;" alt="EM Snapshot">
+                <canvas id="measureCanvas"></canvas>
                 <span id="emPlaceholder">Click a contact or synapse to view EM</span>
             </div>
             <div class="em-controls">
@@ -444,12 +535,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     <span id="emOpacityValue" class="control-value" style="min-width:45px;">100%</span>
                     <button id="btnDownloadEM" title="Download current EM image with coordinates and touching cells">&#128247; Download EM</button>
                 </div>
+                <div class="control-row" style="gap:8px;flex-wrap:wrap;">
+                    <button id="btnMeasure" title="Trace the membrane apposition to measure contact length/area (8 nm/px)">&#128207; Measure</button>
+                    <button id="btnMeasureMode" title="Toggle Line (apposition length &times; 40 nm/slice) vs Area (polygon cross-section)" disabled>Mode: Line</button>
+                    <button id="btnMeasureUndo" title="Undo last point" disabled>&#8630; Undo</button>
+                    <button id="btnMeasureClear" title="Clear this slice's trace" disabled>Clear</button>
+                    <button id="btnMeasureExport" title="Export all measurements as CSV" disabled>&#128190; CSV</button>
+                    <span id="measureReadout" class="measure-readout">Measure: off</span>
+                </div>
                 <div class="control-row" style="justify-content: center; gap: 12px; flex-wrap: wrap;">
                     <span id="zNote" style="color: #888; font-size: 10px;">&#177;800nm depth range</span>
                     <button id="btnDeleteSlice" title="Remove this single slice (contact or overlap Z-slice)">&#128465; Delete Slice</button>
                     <button id="btnDeleteAll" title="Remove entire overlap pair (all slices)">&#128465; Delete All</button>
                     <button id="btnMarkGJ" title="Mark current location as putative gap junction">&#9889; Putative Gap-Junc</button>
                     <button id="btnRemoveGJ" title="Remove gap junction at current location" style="display:none;">&#10006; Remove GJ</button>
+                    <button id="btnAllGJ" title="Show/hide all putative gap-junction sites (axonal motor&harr;LPTC contacts)">&#9889; All Putative GJ</button>
                     <button id="btnMatrix" title="Show overlap area heatmap matrix" style="background:#1565C0;border-color:#42A5F5;">&#9638; Matrix</button>
                     <button id="btnExport" title="Export list of deleted contacts">&#128190; Export</button>
                 </div>
@@ -579,6 +679,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const matrixModal   = document.getElementById('matrixModal');
         const btnMarkGJ     = document.getElementById('btnMarkGJ');
         const btnRemoveGJ   = document.getElementById('btnRemoveGJ');
+        const btnAllGJ      = document.getElementById('btnAllGJ');
         const gjContainer   = document.getElementById('gjContainer');
         const modalTitle    = document.getElementById('modalTitle');
         const connectivityContainer = document.getElementById('connectivityContainer');
@@ -1419,6 +1520,192 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         emOpacitySlider.addEventListener('input', updateEMOpacity);
         btnDownloadEM.addEventListener('click', downloadCurrentEMSnapshot);
+
+        // ── EM measurement tool (apposition length / cross-section area) ─────
+        // EM images are 8 nm/px in-plane, 40 nm between Z-slices. LINE mode
+        // traces the apposed membrane on each slice; contact area is then
+        // Σ(length × 40 nm) across the slices spanned. AREA mode traces a closed
+        // polygon → cross-sectional area. The scale is exact, so both are direct
+        // pixel→nm conversions.
+        const NM_PER_PX = 8.0;
+        const NM_PER_SLICE = 40.0;
+        const measureCanvas = document.getElementById('measureCanvas');
+        const mctx = measureCanvas.getContext('2d');
+        const btnMeasure = document.getElementById('btnMeasure');
+        const btnMeasureMode = document.getElementById('btnMeasureMode');
+        const btnMeasureUndo = document.getElementById('btnMeasureUndo');
+        const btnMeasureClear = document.getElementById('btnMeasureClear');
+        const btnMeasureExport = document.getElementById('btnMeasureExport');
+        const measureReadout = document.getElementById('measureReadout');
+
+        let measureOn = false;
+        let measureMode = 'line';       // 'line' | 'area'
+        const measureStore = {};        // 'kind:idx:zoff' -> {mode, source, target, absZ, zoff, pts}
+        let hoverPt = null;
+
+        function measureKey() { return currentKind + ':' + currentIdx + ':' + currentZ; }
+
+        // object-fit:contain image rect (client px) → scale + letterbox offsets.
+        function containedImgRect() {
+            const r = emImage.getBoundingClientRect();
+            const natW = emImage.naturalWidth || 512, natH = emImage.naturalHeight || 512;
+            const scale = Math.min(r.width / natW, r.height / natH);
+            return { scale, offX: r.left + (r.width - natW * scale) / 2,
+                     offY: r.top + (r.height - natH * scale) / 2, natW, natH };
+        }
+        function clientToNative(cx, cy) {
+            const c = containedImgRect();
+            return [(cx - c.offX) / c.scale, (cy - c.offY) / c.scale];
+        }
+        function nativeToCanvas(nx, ny) {
+            const c = containedImgRect();
+            const canR = measureCanvas.getBoundingClientRect();
+            return [(c.offX - canR.left) + nx * c.scale, (c.offY - canR.top) + ny * c.scale];
+        }
+        function polylineLenNm(pts) {
+            let L = 0;
+            for (let i = 1; i < pts.length; i++)
+                L += Math.hypot(pts[i][0] - pts[i-1][0], pts[i][1] - pts[i-1][1]);
+            return L * NM_PER_PX;
+        }
+        function polygonAreaUm2(pts) {
+            if (pts.length < 3) return 0;
+            let a = 0;
+            for (let i = 0; i < pts.length; i++) {
+                const p = pts[i], q = pts[(i + 1) % pts.length];
+                a += p[0] * q[1] - q[0] * p[1];
+            }
+            return Math.abs(a) / 2 * NM_PER_PX * NM_PER_PX / 1e6;
+        }
+        // Sum apposition area over all traced slices of the current pair (line mode).
+        function appositionAreaUm2() {
+            let area = 0, n = 0;
+            const prefix = currentKind + ':' + currentIdx + ':';
+            for (const k in measureStore) {
+                if (k.indexOf(prefix) !== 0) continue;
+                const m = measureStore[k];
+                if (m.mode === 'line' && m.pts.length >= 2) {
+                    area += polylineLenNm(m.pts) * NM_PER_SLICE / 1e6; n++;
+                }
+            }
+            return { area, n };
+        }
+        function updateMeasureReadout() {
+            if (!measureOn) { measureReadout.textContent = 'Measure: off'; return; }
+            const m = measureStore[measureKey()];
+            const pts = m ? m.pts : [];
+            if (measureMode === 'line') {
+                const acc = appositionAreaUm2();
+                measureReadout.textContent = 'Line | slice ' + polylineLenNm(pts).toFixed(0)
+                    + ' nm | area (' + acc.n + ' sl × 40 nm) = ' + acc.area.toFixed(4) + ' µm²';
+            } else {
+                measureReadout.textContent = 'Area | ' + polygonAreaUm2(pts).toFixed(4)
+                    + ' µm² (' + pts.length + ' pts)';
+            }
+        }
+        function redrawMeasure() {
+            const canR = measureCanvas.getBoundingClientRect();
+            if (measureCanvas.width !== Math.round(canR.width)) measureCanvas.width = Math.round(canR.width);
+            if (measureCanvas.height !== Math.round(canR.height)) measureCanvas.height = Math.round(canR.height);
+            mctx.clearRect(0, 0, measureCanvas.width, measureCanvas.height);
+            if (!measureOn) return;
+            const m = measureStore[measureKey()];
+            const pts = m ? m.pts : [];
+            const draw = pts.map(p => nativeToCanvas(p[0], p[1]));
+            const preview = draw.slice();
+            if (hoverPt && draw.length) preview.push(nativeToCanvas(hoverPt[0], hoverPt[1]));
+            mctx.lineWidth = 2; mctx.strokeStyle = '#39FF14';
+            mctx.fillStyle = 'rgba(57,255,20,0.15)';
+            if (preview.length) {
+                mctx.beginPath();
+                mctx.moveTo(preview[0][0], preview[0][1]);
+                for (let i = 1; i < preview.length; i++) mctx.lineTo(preview[i][0], preview[i][1]);
+                if (measureMode === 'area' && preview.length > 2) { mctx.closePath(); mctx.fill(); }
+                mctx.stroke();
+            }
+            mctx.fillStyle = '#FFD400';
+            draw.forEach(p => { mctx.beginPath(); mctx.arc(p[0], p[1], 3, 0, 2 * Math.PI); mctx.fill(); });
+            updateMeasureReadout();
+        }
+        function setMeasureButtons() {
+            [btnMeasureMode, btnMeasureUndo, btnMeasureClear].forEach(b => b.disabled = !measureOn);
+            btnMeasureExport.disabled = Object.keys(measureStore).length === 0;
+        }
+
+        btnMeasure.addEventListener('click', function() {
+            measureOn = !measureOn;
+            btnMeasure.classList.toggle('active', measureOn);
+            measureCanvas.classList.toggle('active', measureOn);
+            setMeasureButtons(); hoverPt = null; redrawMeasure();
+        });
+        btnMeasureMode.addEventListener('click', function() {
+            measureMode = (measureMode === 'line') ? 'area' : 'line';
+            btnMeasureMode.textContent = 'Mode: ' + (measureMode === 'line' ? 'Line' : 'Area');
+            redrawMeasure();
+        });
+        btnMeasureUndo.addEventListener('click', function() {
+            const k = measureKey(), m = measureStore[k];
+            if (m && m.pts.length) { m.pts.pop(); if (!m.pts.length) delete measureStore[k]; }
+            setMeasureButtons(); redrawMeasure();
+        });
+        btnMeasureClear.addEventListener('click', function() {
+            delete measureStore[measureKey()]; setMeasureButtons(); redrawMeasure();
+        });
+        measureCanvas.addEventListener('mousedown', function(e) {
+            if (!measureOn || currentIdx === null || e.button !== 0) return;
+            const [nx, ny] = clientToNative(e.clientX, e.clientY);
+            const c = containedImgRect();
+            if (nx < 0 || ny < 0 || nx > c.natW || ny > c.natH) return;  // outside image
+            const k = measureKey();
+            if (!measureStore[k]) measureStore[k] = {
+                mode: measureMode, source: currentSource, target: currentTarget,
+                absZ: Math.round(curItemZnm + currentZ * 40), zoff: currentZ, pts: []
+            };
+            measureStore[k].mode = measureMode;
+            measureStore[k].pts.push([nx, ny]);
+            setMeasureButtons(); redrawMeasure();
+        });
+        measureCanvas.addEventListener('mousemove', function(e) {
+            if (!measureOn) return;
+            hoverPt = clientToNative(e.clientX, e.clientY); redrawMeasure();
+        });
+        measureCanvas.addEventListener('mouseleave', function() { hoverPt = null; redrawMeasure(); });
+        window.addEventListener('resize', redrawMeasure);
+        // Redraw whenever a new EM slice/image loads (persists across loadImage's
+        // own onload reassignment).
+        emImage.addEventListener('load', redrawMeasure);
+
+        btnMeasureExport.addEventListener('click', function() {
+            const rows = [['kind','idx','source','target','z_offset','abs_z_nm','mode',
+                           'n_points','slice_length_nm','slice_area_um2']];
+            const pairAcc = {};
+            for (const k in measureStore) {
+                const m = measureStore[k];
+                const parts = k.split(':'), kind = parts[0], idx = parts[1];
+                const len = (m.mode === 'line') ? polylineLenNm(m.pts) : 0;
+                const ar  = (m.mode === 'area') ? polygonAreaUm2(m.pts) : 0;
+                rows.push([kind, idx, m.source || '', m.target || '', m.zoff, m.absZ,
+                           m.mode, m.pts.length, len.toFixed(1), ar.toFixed(6)]);
+                if (m.mode === 'line' && m.pts.length >= 2) {
+                    const pk = kind + ':' + idx;
+                    pairAcc[pk] = pairAcc[pk] || {source: m.source, target: m.target, area: 0, n: 0};
+                    pairAcc[pk].area += len * NM_PER_SLICE / 1e6; pairAcc[pk].n++;
+                }
+            }
+            rows.push([]);
+            rows.push(['# apposition area (line mode: sum of length x 40 nm/slice)']);
+            rows.push(['pair','source','target','n_slices','contact_area_um2']);
+            for (const pk in pairAcc) {
+                const a = pairAcc[pk];
+                rows.push([pk, a.source, a.target, a.n, a.area.toFixed(6)]);
+            }
+            const csv = rows.map(r => r.join(',')).join('\n');
+            const blob = new Blob([csv], {type: 'text/csv'});
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url; link.download = 'em_measurements.csv'; link.click();
+            URL.revokeObjectURL(url);
+        });
         updateEMOpacity();
 
         // ── Z-stack navigation ──────────────────────────────────────
@@ -1828,6 +2115,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 + ' marked at ' + currentSource + ' \u2194 ' + currentTarget
                 + ' (' + Math.round(curItemX) + ', ' + Math.round(curItemY)
                 + ', ' + Math.round(curItemZ) + ')';
+        });
+
+        // Toggle the full set of pre-selected putative-GJ markers. Hidden on
+        // load; the user reveals them on demand with this button.
+        let _allGJVisible = false;
+        const _preselGJIdx = traceInfo['_preselected_gj'];
+        btnAllGJ.addEventListener('click', function() {
+            if (_preselGJIdx === undefined) return;
+            _allGJVisible = !_allGJVisible;
+            safeRestyle(plotDiv, { visible: [_allGJVisible] }, [_preselGJIdx]);
+            btnAllGJ.style.background = _allGJVisible ? '#2E7D32' : '';
+            btnAllGJ.style.borderColor = _allGJVisible ? '#66BB6A' : '';
+            infoText.textContent = _allGJVisible
+                ? '⚡ Showing all putative gap-junction sites (axonal motor↔LPTC contacts)'
+                : 'Putative gap-junction markers hidden';
         });
 
         btnRemoveGJ.addEventListener('click', function() {
@@ -5804,28 +6106,28 @@ def build_figure(mesh_dir):
     print(f"  [gap_junctions] marker trace added")
 
     # ── 7b. Pre-selected putative gap-junction sites (always visible) ──
-    # Curated EM locations, marked on load with the same green marker as the
-    # interactive putative gap junctions (which are gated behind checkboxes and
-    # stay hidden until enabled). Add sites via PRESELECTED_GJ_SITES above.
+    # The confirmed MOT_R<->HSN_R junction (larger marker) plus curated example
+    # sites from gj_figures/gj_sites.json, marked on load with the green
+    # putative-GJ marker style (the interactive GJ trace is checkbox-gated).
     trace_info['_preselected_gj'] = len(traces)
-    _pg_x, _pg_y, _pg_z, _pg_txt = [], [], [], []
-    for _site in PRESELECTED_GJ_SITES:
-        _nm = _preselected_gj_nm(_site["voxel"])
-        _pg_x.append(_nm[0]); _pg_y.append(_nm[1]); _pg_z.append(_nm[2])
-        _pg_txt.append('{}<br>voxel {} @ {} nm/vox = {} nm'.format(
-            _site["label"], _site["voxel"], PRESELECTED_GJ_VOXEL_NM, _nm))
+    _sites = _load_preselected_gj(RESULTS_DIR)
+    _pg_x = [s[0] for s in _sites]
+    _pg_y = [s[1] for s in _sites]
+    _pg_z = [s[2] for s in _sites]
+    _pg_txt = ['{}<br>{} nm'.format(s[3], (int(s[0]), int(s[1]), int(s[2]))) for s in _sites]
+    _pg_size = [13] + [6] * (len(_sites) - 1)   # confirmed (first) is larger
     traces.append(go.Scatter3d(
         x=_pg_x, y=_pg_y, z=_pg_z,
         mode='markers',
-        name='Pre-selected putative GJ',
-        visible=True,
-        marker=dict(size=6, color='#39FF14', symbol='circle',
+        name='Putative GJ (large = confirmed)',
+        visible=False,   # hidden on load; revealed via the "All Putative GJ" button
+        marker=dict(size=_pg_size, color='#39FF14', symbol='circle',
                     line=dict(color='#0a3d0a', width=1), opacity=1.0),
         hovertext=_pg_txt,
         hovertemplate='%{hovertext}<extra></extra>',
         showlegend=True,
     ))
-    print(f"  [preselected_gj] {len(PRESELECTED_GJ_SITES)} pre-selected GJ site(s) marked")
+    print(f"  [preselected_gj] {len(_sites)} pre-selected GJ site(s) marked (confirmed + curated)")
 
     fig = go.Figure(data=traces)
     fig.update_layout(
@@ -5972,6 +6274,16 @@ def index_em_snapshots(em_snap_dir, contacts, synapses, results_dir):
         if kind == 'overlap' and zoff in zstack_map['overlap'].get(idx, {}):
             continue
         zstack_map.setdefault(kind, {}).setdefault(idx, {})[zoff] = f"em_snaps/{fname}"
+
+    # Defensive: every overlap that has z-stack files must also have a center
+    # image mapped — even when overlap_em_meta.json is absent/incomplete or the
+    # files use coordinate-tagged names. Without this, overlaps show no EM in the
+    # viewer (while synapses, which keep plain names, still work).
+    for idx in list(zstack_map.get('overlap', {}).keys()):
+        if int(idx) not in snapshot_map['overlap']:
+            fn = _find_segmented('overlap', int(idx))
+            if fn:
+                snapshot_map['overlap'][int(idx)] = f"em_snaps/{fn}"
 
     print(f"[snapshots] Indexed z-stacks: "
           f"contact={sum(len(v) for v in zstack_map['contact'].values())}, "

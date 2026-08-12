@@ -223,7 +223,7 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
                 fig, ax = navis.plot2d(
                     mesh_neuron_ds,
                     color=get_color(source_name),
-                    alpha=0.3,
+                    alpha=0.55,
                     view=navis_view,
                     method='2d',
                     radius=True,

@@ -70,3 +70,12 @@ run_regen.py
 *.svg
 comprehensive_overlap_results/*.csv
 comprehensive_overlap_results/*.png
+
+# Documentation figures (small, intentionally tracked)
+!docs/
+!docs/figures/
+!docs/figures/*.png
+
+# Runtime / scratch
+pipeline_run.pid
+investigation_em/

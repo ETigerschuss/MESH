@@ -1823,21 +1823,24 @@ def calculate_large_mesh_overlap(neuronA, neuronB, threshold=100.0):
                 print("  No overlap (bounding box)")
                 return 0.0, create_empty_geometric_data()
         
+        # Seeded RNG so the sampled-area estimate is reproducible run-to-run.
+        rng = np.random.default_rng(0)
+
         # Sample vertices to reduce memory usage
         max_vertices_A = min(50000, len(meshA.vertices))
         max_vertices_B = min(100000, len(meshB.vertices))
-        
+
         # Sample vertices from mesh A
         if len(meshA.vertices) > max_vertices_A:
-            indices_A = np.random.choice(len(meshA.vertices), max_vertices_A, replace=False)
+            indices_A = rng.choice(len(meshA.vertices), max_vertices_A, replace=False)
             sampled_vertices_A = meshA.vertices[indices_A]
         else:
             indices_A = np.arange(len(meshA.vertices))
             sampled_vertices_A = meshA.vertices
-        
+
         # Create KDTree for mesh B (potentially sampled)
         if len(meshB.vertices) > max_vertices_B:
-            indices_B = np.random.choice(len(meshB.vertices), max_vertices_B, replace=False)
+            indices_B = rng.choice(len(meshB.vertices), max_vertices_B, replace=False)
             tree_vertices_B = meshB.vertices[indices_B]
         else:
             indices_B = np.arange(len(meshB.vertices))
@@ -1858,15 +1861,15 @@ def calculate_large_mesh_overlap(neuronA, neuronB, threshold=100.0):
         close_vertices_A = indices_A[close_vertices_A_local]
         close_vertices_B = indices_B[tree_indices[close_mask]]
         
-        # Find faces containing close vertices (limited sampling)
-        close_faces = set()
+        # Find faces containing close vertices (limited sampling). Vectorised
+        # membership test (boolean vertex mask) instead of `v in array` scans.
         max_faces_to_check = min(50000, len(meshA.faces))
-        face_indices_to_check = np.random.choice(len(meshA.faces), max_faces_to_check, replace=False)
-        
-        for face_idx in face_indices_to_check:
-            face = meshA.faces[face_idx]
-            if any(v in close_vertices_A for v in face):
-                close_faces.add(face_idx)
+        face_indices_to_check = rng.choice(len(meshA.faces), max_faces_to_check, replace=False)
+        close_vertex_mask = np.zeros(len(meshA.vertices), dtype=bool)
+        close_vertex_mask[close_vertices_A] = True
+        sel = face_indices_to_check[
+            close_vertex_mask[meshA.faces[face_indices_to_check]].any(axis=1)]
+        close_faces = set(sel.tolist())
         
         # Calculate area from sampled faces
         total_area = 0.0
@@ -1995,12 +1998,14 @@ def calculate_neuron_overlap_simple(neuronA, neuronB, threshold=100.0):
             print("  No close vertices")
             return 0.0, create_empty_geometric_data()
         
-        # Find faces containing close vertices
-        close_faces = set()
-        for face_idx, face in enumerate(meshA.faces):
-            if any(v in close_vertices for v in face):
-                close_faces.add(face_idx)
-        
+        # Find faces with at least one close vertex. Vectorised: build a boolean
+        # vertex mask and test all faces at once. (The previous `v in
+        # close_vertices` scanned the whole array per vertex per face — O(F·N).)
+        close_vertex_mask = np.zeros(len(meshA.vertices), dtype=bool)
+        close_vertex_mask[close_vertices] = True
+        face_has_close = close_vertex_mask[meshA.faces].any(axis=1)
+        close_faces = np.where(face_has_close)[0]
+
         # Calculate area and collect geometric data (limit face data to prevent memory issues)
         total_area = 0.0
         face_data = []
