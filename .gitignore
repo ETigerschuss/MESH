@@ -79,3 +79,4 @@ comprehensive_overlap_results/*.png
 # Runtime / scratch
 pipeline_run.pid
 investigation_em/
+baseline_areas.csv

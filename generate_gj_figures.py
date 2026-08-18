@@ -40,6 +40,7 @@ if sys.stdout.encoding != "utf-8":
         pass
 
 from mesh_config import load_config
+from proofreading import drop_rejected
 
 # Partner groups whose contacts are eligible as GJ examples / drawn as blobs.
 BLOB_GROUPS = {"MOT": {"HS"}, "MOS": {"HS", "VS"}}
@@ -326,6 +327,7 @@ def main():
     pat = pd.read_csv(os.path.join(rd, "geometric_data", "contact_patches.csv"),
                       usecols=["neuron_a", "neuron_b", "patch_centroid_x", "patch_centroid_y",
                                "patch_centroid_z", "patch_area_um2"])
+    pat = drop_rejected(pat, rd)
     sp = os.path.join(rd, "synapses.csv")
     syn = pd.read_csv(sp) if os.path.exists(sp) else pd.DataFrame(columns=["pre_type", "post_type", "x", "y", "z"])
     em = CloudVolume(EM_CLOUDPATH, mip=EM_MIP, use_https=True, progress=False)

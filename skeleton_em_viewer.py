@@ -647,6 +647,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const overlapPairs  = {OVERLAP_PAIRS_JSON};
         const overlapPairFaces = {OVERLAP_PAIR_FACES_JSON};
         const neuronColors  = {NEURON_COLORS_JSON};
+        // Automatic (geometric) contact area per pair, um2 — for comparing the
+        // hand-traced measurement against the pipeline's own number.
+        const autoAreas     = {AUTO_AREAS_JSON};
         // Keep the hardcoded Tier-1 model cells colored even if the active config
         // omits them (the 26-cell publication set drops BIPS/H2 from the config,
         // but the biophysical model still references them internally).
@@ -1540,10 +1543,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         let measureOn = false;
         let measureMode = 'line';       // 'line' | 'area'
-        const measureStore = {};        // 'kind:idx:zoff' -> {mode, source, target, absZ, zoff, pts}
+        // 'kind:idx:zoff' -> {mode, source, target, absZ, zoff, traces:[[[x,y],...], ...]}
+        // A slice can hold SEVERAL traces: right-click finishes the current one
+        // so the next click starts a new trace (several appositions per image).
+        const measureStore = {};
         let hoverPt = null;
 
         function measureKey() { return currentKind + ':' + currentIdx + ':' + currentZ; }
+        function pairKeyOf(s, t) { return [s, t].sort().join(' <-> '); }
+
+        // traces of the current slice; the LAST one is the one being drawn
+        function tracesAt(key) {
+            const m = measureStore[key];
+            return (m && m.traces) ? m.traces : [];
+        }
+        function activeTrace(key) {
+            const t = tracesAt(key);
+            return t.length ? t[t.length - 1] : null;
+        }
 
         // object-fit:contain image rect (client px) → scale + letterbox offsets.
         function containedImgRect() {
@@ -1577,30 +1594,42 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             }
             return Math.abs(a) / 2 * NM_PER_PX * NM_PER_PX / 1e6;
         }
-        // Sum apposition area over all traced slices of the current pair (line mode).
+        // Apposition area over every traced slice of the CURRENT PAIR (line mode).
+        // Each slice contributes sum(trace lengths) x 40 nm section thickness.
         function appositionAreaUm2() {
-            let area = 0, n = 0;
-            const prefix = currentKind + ':' + currentIdx + ':';
+            let area = 0, n = 0, nTraces = 0;
+            const pair = pairKeyOf(currentSource, currentTarget);
             for (const k in measureStore) {
-                if (k.indexOf(prefix) !== 0) continue;
                 const m = measureStore[k];
-                if (m.mode === 'line' && m.pts.length >= 2) {
-                    area += polylineLenNm(m.pts) * NM_PER_SLICE / 1e6; n++;
-                }
+                if (m.mode !== 'line') continue;
+                if (pairKeyOf(m.source, m.target) !== pair) continue;
+                let sliceLen = 0, used = 0;
+                (m.traces || []).forEach(t => {
+                    if (t.length >= 2) { sliceLen += polylineLenNm(t); used++; }
+                });
+                if (used) { area += sliceLen * NM_PER_SLICE / 1e6; n++; nTraces += used; }
             }
-            return { area, n };
+            return { area, n, nTraces };
         }
         function updateMeasureReadout() {
             if (!measureOn) { measureReadout.textContent = 'Measure: off'; return; }
-            const m = measureStore[measureKey()];
-            const pts = m ? m.pts : [];
+            const traces = tracesAt(measureKey());
             if (measureMode === 'line') {
+                let sliceLen = 0;
+                traces.forEach(t => { if (t.length >= 2) sliceLen += polylineLenNm(t); });
                 const acc = appositionAreaUm2();
-                measureReadout.textContent = 'Line | slice ' + polylineLenNm(pts).toFixed(0)
-                    + ' nm | area (' + acc.n + ' sl × 40 nm) = ' + acc.area.toFixed(4) + ' µm²';
+                const auto = autoAreas[pairKeyOf(currentSource, currentTarget)];
+                let txt = 'Line | slice ' + sliceLen.toFixed(0) + ' nm';
+                if (traces.length > 1) txt += ' (' + traces.length + ' traces)';
+                txt += ' | manual ' + acc.area.toFixed(4) + ' µm² (' + acc.n + ' sl)';
+                if (auto) txt += ' | auto ' + auto.toFixed(3)
+                    + ' µm² → ' + (100 * acc.area / auto).toFixed(1) + '%';
+                measureReadout.textContent = txt;
             } else {
-                measureReadout.textContent = 'Area | ' + polygonAreaUm2(pts).toFixed(4)
-                    + ' µm² (' + pts.length + ' pts)';
+                let a = 0;
+                traces.forEach(t => { a += polygonAreaUm2(t); });
+                measureReadout.textContent = 'Area | ' + a.toFixed(4) + ' µm² ('
+                    + traces.length + ' polygon' + (traces.length === 1 ? '' : 's') + ')';
             }
         }
         function redrawMeasure() {
@@ -1609,22 +1638,31 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             if (measureCanvas.height !== Math.round(canR.height)) measureCanvas.height = Math.round(canR.height);
             mctx.clearRect(0, 0, measureCanvas.width, measureCanvas.height);
             if (!measureOn) return;
-            const m = measureStore[measureKey()];
-            const pts = m ? m.pts : [];
-            const draw = pts.map(p => nativeToCanvas(p[0], p[1]));
-            const preview = draw.slice();
-            if (hoverPt && draw.length) preview.push(nativeToCanvas(hoverPt[0], hoverPt[1]));
-            mctx.lineWidth = 2; mctx.strokeStyle = '#39FF14';
-            mctx.fillStyle = 'rgba(57,255,20,0.15)';
-            if (preview.length) {
-                mctx.beginPath();
-                mctx.moveTo(preview[0][0], preview[0][1]);
-                for (let i = 1; i < preview.length; i++) mctx.lineTo(preview[i][0], preview[i][1]);
-                if (measureMode === 'area' && preview.length > 2) { mctx.closePath(); mctx.fill(); }
-                mctx.stroke();
-            }
-            mctx.fillStyle = '#FFD400';
-            draw.forEach(p => { mctx.beginPath(); mctx.arc(p[0], p[1], 3, 0, 2 * Math.PI); mctx.fill(); });
+            const key = measureKey();
+            const traces = tracesAt(key);
+            const lastIdx = traces.length - 1;
+            traces.forEach((pts, ti) => {
+                const draw = pts.map(p => nativeToCanvas(p[0], p[1]));
+                const preview = draw.slice();
+                // rubber-band only on the trace currently being drawn
+                if (ti === lastIdx && hoverPt && draw.length)
+                    preview.push(nativeToCanvas(hoverPt[0], hoverPt[1]));
+                // finished traces are dimmed so the active one stands out
+                mctx.lineWidth = 2;
+                mctx.strokeStyle = (ti === lastIdx) ? '#39FF14' : '#1f9c12';
+                mctx.fillStyle = 'rgba(57,255,20,0.15)';
+                if (preview.length) {
+                    mctx.beginPath();
+                    mctx.moveTo(preview[0][0], preview[0][1]);
+                    for (let i = 1; i < preview.length; i++) mctx.lineTo(preview[i][0], preview[i][1]);
+                    if (measureMode === 'area' && preview.length > 2) { mctx.closePath(); mctx.fill(); }
+                    mctx.stroke();
+                }
+                mctx.fillStyle = (ti === lastIdx) ? '#FFD400' : '#b38f00';
+                draw.forEach(p => {
+                    mctx.beginPath(); mctx.arc(p[0], p[1], 3, 0, 2 * Math.PI); mctx.fill();
+                });
+            });
             updateMeasureReadout();
         }
         function setMeasureButtons() {
@@ -1645,7 +1683,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         });
         btnMeasureUndo.addEventListener('click', function() {
             const k = measureKey(), m = measureStore[k];
-            if (m && m.pts.length) { m.pts.pop(); if (!m.pts.length) delete measureStore[k]; }
+            if (!m || !m.traces.length) return;
+            const t = m.traces[m.traces.length - 1];
+            t.pop();
+            // an emptied trace is dropped, exposing the previous one for editing
+            if (!t.length) m.traces.pop();
+            if (!m.traces.length) delete measureStore[k];
             setMeasureButtons(); redrawMeasure();
         });
         btnMeasureClear.addEventListener('click', function() {
@@ -1659,11 +1702,33 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const k = measureKey();
             if (!measureStore[k]) measureStore[k] = {
                 mode: measureMode, source: currentSource, target: currentTarget,
-                absZ: Math.round(curItemZnm + currentZ * 40), zoff: currentZ, pts: []
+                absZ: Math.round(curItemZnm + currentZ * 40), zoff: currentZ, traces: [[]]
             };
-            measureStore[k].mode = measureMode;
-            measureStore[k].pts.push([nx, ny]);
+            const m = measureStore[k];
+            m.mode = measureMode;
+            if (!m.traces.length) m.traces.push([]);
+            m.traces[m.traces.length - 1].push([nx, ny]);
             setMeasureButtons(); redrawMeasure();
+        });
+
+        // Right-click finishes the current trace, so the next left-click starts a
+        // NEW one — for images with several separate appositions.
+        measureCanvas.addEventListener('contextmenu', function(e) {
+            if (!measureOn) return;
+            e.preventDefault();
+            const m = measureStore[measureKey()];
+            if (!m || !m.traces.length) return;
+            const t = m.traces[m.traces.length - 1];
+            if (t.length >= 2) {
+                m.traces.push([]);           // start a fresh trace
+                hoverPt = null;
+                infoText.textContent = '✓ Trace ' + (m.traces.length - 1)
+                    + ' finished (' + polylineLenNm(t).toFixed(0)
+                    + ' nm) — click to start the next one';
+            } else if (t.length) {
+                t.length = 0;                // discard a stray single point
+            }
+            redrawMeasure();
         });
         measureCanvas.addEventListener('mousemove', function(e) {
             if (!measureOn) return;
@@ -1676,28 +1741,41 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         emImage.addEventListener('load', redrawMeasure);
 
         btnMeasureExport.addEventListener('click', function() {
-            const rows = [['kind','idx','source','target','z_offset','abs_z_nm','mode',
-                           'n_points','slice_length_nm','slice_area_um2']];
+            const rows = [['kind','idx','source','target','pair','z_offset','abs_z_nm','mode',
+                           'trace','n_points','trace_length_nm','trace_area_um2']];
             const pairAcc = {};
             for (const k in measureStore) {
                 const m = measureStore[k];
                 const parts = k.split(':'), kind = parts[0], idx = parts[1];
-                const len = (m.mode === 'line') ? polylineLenNm(m.pts) : 0;
-                const ar  = (m.mode === 'area') ? polygonAreaUm2(m.pts) : 0;
-                rows.push([kind, idx, m.source || '', m.target || '', m.zoff, m.absZ,
-                           m.mode, m.pts.length, len.toFixed(1), ar.toFixed(6)]);
-                if (m.mode === 'line' && m.pts.length >= 2) {
-                    const pk = kind + ':' + idx;
-                    pairAcc[pk] = pairAcc[pk] || {source: m.source, target: m.target, area: 0, n: 0};
-                    pairAcc[pk].area += len * NM_PER_SLICE / 1e6; pairAcc[pk].n++;
+                const pk = pairKeyOf(m.source, m.target);
+                let sliceLen = 0;
+                (m.traces || []).forEach((t, ti) => {
+                    if (!t.length) return;
+                    const len = (m.mode === 'line') ? polylineLenNm(t) : 0;
+                    const ar  = (m.mode === 'area') ? polygonAreaUm2(t) : 0;
+                    rows.push([kind, idx, m.source || '', m.target || '', pk, m.zoff, m.absZ,
+                               m.mode, ti + 1, t.length, len.toFixed(1), ar.toFixed(6)]);
+                    if (m.mode === 'line' && t.length >= 2) sliceLen += len;
+                });
+                if (m.mode === 'line' && sliceLen > 0) {
+                    pairAcc[pk] = pairAcc[pk] || {area: 0, n: 0};
+                    pairAcc[pk].area += sliceLen * NM_PER_SLICE / 1e6;
+                    pairAcc[pk].n++;
                 }
             }
             rows.push([]);
-            rows.push(['# apposition area (line mode: sum of length x 40 nm/slice)']);
-            rows.push(['pair','source','target','n_slices','contact_area_um2']);
+            rows.push(['# Manual vs automatic contact area per pair.']);
+            rows.push(['# manual = sum over traced slices of (traced length x 40 nm section).']);
+            rows.push(['# automatic = geometric contact area from the pipeline (post-proofreading).']);
+            rows.push(['# NOTE: manual covers only the slices actually traced, so it is a lower']);
+            rows.push(['#       bound unless every slice of the contact was traced.']);
+            rows.push(['pair','n_slices_traced','manual_area_um2','automatic_area_um2','manual_pct_of_auto']);
             for (const pk in pairAcc) {
                 const a = pairAcc[pk];
-                rows.push([pk, a.source, a.target, a.n, a.area.toFixed(6)]);
+                const auto = autoAreas[pk];
+                rows.push([pk, a.n, a.area.toFixed(6),
+                           (auto !== undefined ? auto.toFixed(6) : ''),
+                           (auto ? (100 * a.area / auto).toFixed(1) : '')]);
             }
             const csv = rows.map(r => r.join(',')).join('\n');
             const blob = new Blob([csv], {type: 'text/csv'});
@@ -6534,6 +6612,20 @@ def generate_html(fig, contacts, synapses, trace_info,
     html = html.replace('{OVERLAP_PAIR_FACES_JSON}',
                          json.dumps(overlap_pair_faces_json))
     html = html.replace('{NEURON_COLORS_JSON}', json.dumps(NEURON_COLORS))
+
+    # Automatic per-pair contact area (um2) from the EM cluster metadata, so the
+    # viewer can show hand-traced vs automatic side by side. Reads the *current*
+    # metadata, i.e. it already reflects any applied proofreading.
+    _auto_areas = {}
+    _meta_f = os.path.join(RESULTS_DIR, 'overlap_em_meta.json')
+    if os.path.exists(_meta_f):
+        try:
+            for _m in json.load(open(_meta_f)):
+                _k = ' <-> '.join(sorted((str(_m.get('source')), str(_m.get('target')))))
+                _auto_areas[_k] = _auto_areas.get(_k, 0.0) + float(_m.get('total_area_um2', 0.0))
+        except Exception:
+            _auto_areas = {}
+    html = html.replace('{AUTO_AREAS_JSON}', json.dumps(_auto_areas))
 
     return html
 
