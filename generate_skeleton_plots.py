@@ -67,7 +67,7 @@ neuron_colors = {
     for name, info in _cfg['neurons'].items()
 }
 
-# Color map (MOS, VS, MOT, HS, BIPS)
+# Color map (MOS, VS, MOT, HS)
 def get_color(name):
     return neuron_colors.get(name, '#999999')
 
@@ -82,8 +82,6 @@ def get_group(name):
         return 'VS'
     if 'HS' in name:
         return 'HS'
-    if 'BIPS' in name:
-        return 'BIPS'
     return 'OTHER'
 
 print("="*60)
