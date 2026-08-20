@@ -1,15 +1,14 @@
 cff-version: 1.2.0
 title: "MESH: connectome-scale contact detection and EM proofreading for putative gap junctions"
 message: >-
-  If you use this software, please cite it using the metadata below. The version
-  accompanying the paper is archived separately at
-  https://github.com/ActiveSensing/MESH — cite that one for the published
-  analysis; this repository is the ongoing development version.
+  If you use this software, please cite the paper it accompanies (see
+  preferred-citation below). The build accompanying the paper is archived at
+  https://github.com/ActiveSensing/MESH; this repository is the ongoing
+  development version, which additionally contains a biophysical circuit model.
 type: software
-# TODO before submission: confirm the author list, add ORCIDs and co-authors.
 authors:
-  - family-names: Serbe
-    given-names: Etienne
+  - family-names: Serbe-Kamp
+    given-names: Étienne
     # orcid: "https://orcid.org/0000-0000-0000-0000"
 repository-code: "https://github.com/ETigerschuss/MESH"
 abstract: >-
@@ -33,5 +32,31 @@ keywords:
   - electron microscopy
   - gap junctions
   - electrical synapses
+  - efference copy
   - biophysical modelling
 license: MIT
+
+preferred-citation:
+  type: article
+  title: "Vectorial efference copy and visuomotor transformation through gap junctions"
+  authors:
+    - family-names: Falt
+      given-names: Tjalda
+    - family-names: Ammer
+      given-names: Georg
+    - family-names: Serbe-Kamp
+      given-names: Étienne
+    - family-names: Kroell
+      given-names: Lisa M.
+    - family-names: Friedrich
+      given-names: Anja B.
+    - family-names: Guerreiro-Mota
+      given-names: Sara
+    - family-names: Šimsová
+      given-names: Eliška
+    - family-names: Fenk
+      given-names: Lisa M.
+  doi: "10.64898/2026.08.11.744090"
+  url: "https://www.biorxiv.org/content/10.64898/2026.08.11.744090v1"
+  journal: "bioRxiv"
+  year: 2026

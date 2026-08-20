@@ -10,6 +10,10 @@ It is a general tool. You give it a list of segment IDs; it gives you their cont
 
 ### Came here from the paper?
 
+> **Paper:** Falt et al., *Vectorial efference copy and visuomotor transformation
+> through gap junctions* — [bioRxiv](https://www.biorxiv.org/content/10.64898/2026.08.11.744090v1) ·
+> [doi:10.64898/2026.08.11.744090](https://doi.org/10.64898/2026.08.11.744090)
+
 **Yes — this is the tool used in the paper.** It found the motor-neuron ↔ LPTC
 appositions, cut the EM around them, and provided the proofreading and
 measurement used to check them. The overlap figures in the paper are generated
@@ -624,3 +628,14 @@ To add new neurons:
 
 To change the overlap distance threshold:
 - Edit `THRESHOLDS_MICRONS` in `overlap_analysis.py`
+
+## Citation
+
+If you use MESH, please cite the paper:
+
+> Falt, T., Ammer, G., Serbe-Kamp, É., Kroell, L. M., Friedrich, A. B.,
+> Guerreiro-Mota, S., Šimsová, E., & Fenk, L. M. (2026).
+> **Vectorial efference copy and visuomotor transformation through gap junctions.**
+> *bioRxiv.* [doi:10.64898/2026.08.11.744090](https://doi.org/10.64898/2026.08.11.744090)
+
+For the software itself, see [`CITATION.cff`](CITATION.cff).
