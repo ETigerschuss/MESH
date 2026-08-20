@@ -10,8 +10,6 @@ Analyses pairwise spatial overlaps between **22 neurons** in the *Drosophila* op
 - **8 VS neurons** — Vertical System LPTCs: VS1-VS4, left + right
 - **6 HS neurons** — Horizontal System LPTCs: HSN, HSE, HSS, left + right
 - **4 Motor neurons** — MOT_L/R (neck rotation), MOS_L/R (smooth eye movements)
-- **2 BIPS neurons** — Bistratified inhibitory projection neurons (GABAergic → HS)
-- **2 H2 neurons** — H2 horizontal optic flow detectors
 
 **Key features:**
 - Pairwise overlap analysis at configurable distance thresholds
