@@ -1,4 +1,4 @@
-# MESH — find and proofread neuron–neuron contacts in EM connectomes
+# MESH (Mesh EM-data and Synapse Hub) — find and proofread neuron–neuron contacts in EM connectomes
 
 **MESH answers a question that is otherwise tedious to ask of a connectome: *where do these two neurons actually touch, and what does that contact look like in the electron microscope?***
 
