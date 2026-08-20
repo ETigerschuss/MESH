@@ -77,7 +77,11 @@ Without this step, roughly a third of the "contact" you would report — and, in
 - **Measurement tool** — trace an apposed membrane and read length/area directly (8 nm/px, 40 nm sections)
 - **Proofreading that persists** — deletions are applied back to the dataset, not just logged
 - Publication-ready figures (skeleton + contact sites + EM insets) as PNG and PDF
-- 2D skeleton projection plots and an integrated biophysical circuit simulator
+- 2D skeleton projection plots, with contacts painted at their true size on the membrane
+- **Graveyard** — rejected EM images are moved aside, not deleted, and can be revived
+- **Biophysical circuit model** — Hodgkin-Huxley simulation of the LPTC-motor-neuron
+  network, coupled by the gap junctions and chemical synapses found above, with an
+  eye-movement readout and parameters editable in the browser
 
 ## Pipeline Scripts
 
