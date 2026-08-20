@@ -1,9 +1,12 @@
 cff-version: 1.2.0
 title: "MESH: connectome-scale contact detection and EM proofreading for putative gap junctions"
-message: "If you use this software, please cite it using the metadata from this file."
+message: >-
+  If you use this software, please cite it using the metadata below. The version
+  accompanying the paper is archived separately at
+  https://github.com/ActiveSensing/MESH — cite that one for the published
+  analysis; this repository is the ongoing development version.
 type: software
-# TODO before release: confirm the author list, add ORCIDs, and add co-authors
-# / the Fenk Lab affiliation as appropriate for the paper.
+# TODO before submission: confirm the author list, add ORCIDs and co-authors.
 authors:
   - family-names: Serbe
     given-names: Etienne
@@ -18,7 +21,10 @@ abstract: >-
   in an interactive viewer where an expert can measure, accept or reject each
   site. Because chemical synapses are annotated in FlyWire but gap junctions are
   not, subtracting annotated chemical synapses from validated appositions yields
-  a ranked list of putative electrical-synapse sites.
+  a ranked list of putative electrical-synapse sites. This development build
+  additionally contains a biophysical circuit model of the LPTC-motor-neuron
+  network (Hodgkin-Huxley cells coupled by gap junctions and chemical synapses)
+  and an eye-movement readout.
 keywords:
   - connectomics
   - Drosophila
@@ -27,7 +33,5 @@ keywords:
   - electron microscopy
   - gap junctions
   - electrical synapses
+  - biophysical modelling
 license: MIT
-version: 1.0.0
-# doi: "10.5281/zenodo.XXXXXXX"   # fill in after the first Zenodo release
-date-released: 2026-08-13

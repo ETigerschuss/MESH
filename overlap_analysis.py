@@ -632,6 +632,8 @@ def _get_group(name: str) -> str:
         return "VS"
     if name.startswith("HS"):
         return "HS"
+    if name.startswith("BIPS"):
+        return "BIPS"
     return "OTHER"
 
 def _hemi_of(name: str) -> str | None:
@@ -695,7 +697,7 @@ def _build_color_map(valid_names):
 
 def _computed_group_shades(valid_names):
     """Assign group-based colors (L/R share the same hue):
-    MOS: #4D9221, VS: #D14900, MOT: #5E3C99, HS: #C51B7D.
+    MOS: #4D9221, VS: #D14900, MOT: #5E3C99, HS: #C51B7D, BIPS: black.
     HS shades split across HSN/HSE/HSS; VS shades across VS1-4; others share their base.
     """
 
@@ -704,12 +706,13 @@ def _computed_group_shades(valid_names):
         'MOS': '#4D9221',
         'HS':  '#C51B7D',
         'VS':  '#D14900',
+        'BIPS': '#000000',
     }
 
     def base_id(name: str) -> str:
         return name.split('_')[0]
 
-    ids_by_group: dict[str, set[str]] = {'MOT': set(), 'MOS': set(), 'HS': set(), 'VS': set()}
+    ids_by_group: dict[str, set[str]] = {'MOT': set(), 'MOS': set(), 'HS': set(), 'VS': set(), 'BIPS': set()}
     for n in (base_id(x) for x in valid_names):
         grp = _get_group(n)
         if grp in ids_by_group:
@@ -735,6 +738,7 @@ def _computed_group_shades(valid_names):
     mos_shades = make_shades(BASES['MOS'], sorted(ids_by_group['MOS']))
     hs_shades = make_shades(BASES['HS'], sorted(ids_by_group['HS']))
     vs_shades = make_shades(BASES['VS'], sorted(ids_by_group['VS']))
+    bips_shades = {lab: BASES['BIPS'] for lab in ids_by_group['BIPS']}
 
     color_map = {}
     for name in valid_names:
@@ -747,6 +751,8 @@ def _computed_group_shades(valid_names):
             color_map[name] = hs_shades[base]
         elif base in vs_shades:
             color_map[name] = vs_shades[base]
+        elif base in bips_shades:
+            color_map[name] = bips_shades[base]
         else:
             color_map[name] = '#888888'
     return color_map
@@ -2166,7 +2172,7 @@ def save_individual_patch_data(source, target, contact_area, geo_data, threshold
         print(f"    Saved {len(patch_data)} patches to {filename}")
 
 def generate_target_pairs():
-    """Generate target pairs from the active config pairing_rules."""
+    """Generate target pairs from the active config pairing_rules (no BIPS)."""
     _cfg2, _ = load_config()
 
     # Build name→group mapping
@@ -2453,6 +2459,8 @@ def create_advanced_interactive_viz(matrices, valid_names, thresholds_microns):
             neuron_types.setdefault('Visual', []).append(name)
         elif any(x in name for x in ['HS']):
             neuron_types.setdefault('Horizontal', []).append(name)
+        elif any(x in name for x in ['H2']):
+            neuron_types.setdefault('H2', []).append(name)
         elif any(x in name for x in ['MEME']):
             neuron_types.setdefault('MEME', []).append(name)
         else:

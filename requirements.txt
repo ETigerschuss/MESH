@@ -1,12 +1,19 @@
-cloud-volume>=12.0.0
-navis>=1.3.0
-fafbseg>=3.0.0
-plotly>=5.0.0
-pandas>=2.0.0
-numpy>=1.24.0
+# Connectome data access
+cloud-volume>=12.0.0      # EM + segmentation volumes
+fafbseg>=3.0.0            # FlyWire meshes, synapses, CAVE auth
+navis>=1.3.0              # neuron objects and 2D plotting
+pyfqmr>=0.2.0             # mesh decimation backend used by navis for figures
+
+# Geometry and numerics
 trimesh>=3.20.0
-opencv-python>=4.7.0
+numpy>=1.24.0
+scipy>=1.10.0             # k-d tree, Ward clustering, morphology
+pandas>=2.0.0
+
+# Imaging and plotting
+Pillow>=9.0.0             # EM snapshot rendering
+scikit-image>=0.20.0      # CLAHE contrast for EM insets
 matplotlib>=3.7.0
-Pillow>=9.0.0
-scipy>=1.10.0
+plotly>=5.0.0             # 3D viewer
+
 tqdm>=4.60.0

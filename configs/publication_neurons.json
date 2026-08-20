@@ -1,5 +1,5 @@
 {
-  "_comment": "Default neuron set for the development build (30 cells): the 26 cells used in the paper (MOT, MOS, HSN/HSE/HSS, VS1-4, and VS5-8 as a geometric control) plus BIPS_L/R and H2_L/R, which the biophysical circuit model needs. To reproduce the paper's overlap analysis exactly, use configs/publication_neurons.json instead. Any neuron set works: pass --config or set MESH_NEURON_CONFIG.",
+  "_comment": "PUBLICATION neuron set (26 cells). Run the pipeline with: python run_all.py --config configs/publication_neurons.json (or set MESH_NEURON_CONFIG to this path). Focused subset for the publication: MOT, MOS, HSN/HSE/HSS, VS1-4 and the VS5-8 control group, both hemispheres. BIPS and H2 are intentionally excluded from this set (the hardcoded Tier-1 biophysical model in skeleton_em_viewer.py still keeps its 22 modeled cells internally).",
   "_groups_comment": "One color per group, applied identically to left and right of each cell type: MOT #5E3C99, MOS #4D9221, VS (VS1-4) #D14900, HS #C51B7D, VS5_8 (control) #007F5F.",
   "neurons": {
     "MOT_L": {
@@ -261,55 +261,13 @@
         27,
         125
       ]
-    },
-    "BIPS_L": {
-      "id": 720575940622581173,
-      "group": "BIPS",
-      "color_hex": "#00897B",
-      "color_rgb": [
-        0,
-        137,
-        123
-      ]
-    },
-    "BIPS_R": {
-      "id": 720575940623618708,
-      "group": "BIPS",
-      "color_hex": "#26A69A",
-      "color_rgb": [
-        38,
-        166,
-        154
-      ]
-    },
-    "H2_L": {
-      "id": 720575940631999685,
-      "group": "H2",
-      "color_hex": "#F9A825",
-      "color_rgb": [
-        249,
-        168,
-        37
-      ]
-    },
-    "H2_R": {
-      "id": 720575940632427603,
-      "group": "H2",
-      "color_hex": "#FDD835",
-      "color_rgb": [
-        253,
-        216,
-        53
-      ]
     }
   },
   "synapse_groups": [
     "MOT",
     "MOS",
     "VS",
-    "HS",
-    "BIPS",
-    "H2"
+    "HS"
   ],
   "_synapse_groups_comment": "Synapses loaded only for these groups. VS5_8 (control) is excluded: it participates in geometric overlap analysis only, not synapse loading or the biophysical model.",
   "top_patches": 10,
@@ -340,11 +298,7 @@
     "HSE_L",
     "HSE_R",
     "HSS_L",
-    "HSS_R",
-    "BIPS_L",
-    "BIPS_R",
-    "H2_L",
-    "H2_R"
+    "HSS_R"
   ],
   "_viewer_neurons_comment": "All 26 publication neurons shown in the EM viewer.",
   "model_neurons": [
@@ -367,6 +321,7 @@
     "HSS_L",
     "HSS_R"
   ],
+  "_model_neurons_comment": "Documentation only: the publication cells that are also part of the biophysical model. The Tier-1 model in skeleton_em_viewer.py remains hardcoded to its original 22 cells (these 18 plus BIPS_L/R and H2_L/R); VS5-8 are a geometric overlap control and are not modeled.",
   "face_decimation_nm": 80,
   "_face_decimation_nm_comment": "Overlap face vertex rounding step (nm) for slight decimation in the viewer. 0 = no decimation.",
   "pairing_rules": {

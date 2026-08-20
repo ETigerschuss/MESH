@@ -1,82 +1,60 @@
-# Large data directories
+# ── Pipeline output ───────────────────────────────────────────────
+# Results directories hold meshes, EM snapshots and CSVs (tens of GB).
 comprehensive_overlap_results*/
+results_*/
 neuron_meshes/
 em_snaps/
+em_snaps_graveyard/
 overlap_cache/
+
+# Generated artefacts
 *.obj
+*.html
+skeleton_em_viewer.html
+
+# Working files written during a run
+pipeline_run.pid
+proofreading_applied.log
+baseline_areas.csv
+viewer_annotations*.json
+em_measurements.csv
+*.bak_*
+
+# ── Documentation figures are intentionally tracked ───────────────
+# (docs/figures/*.png is committed; other PNGs are pipeline output)
 *.png
+!docs/figures/*.png
 
-# Pipeline output
-pipeline_log.txt
+# ── Credentials — never commit ────────────────────────────────────
+cave-secret.json
+.env
+*.token
 
-# Python cache
+# ── Python ────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
 *.egg-info/
+.venv/
+venv/
+env/
 dist/
 build/
+.ipynb_checkpoints/
 
-# IDE
+# ── Editors / OS ──────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
-*.swo
-
-# OS files
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Backup and old versions
-*_backup.py
-*_v2.py
-*_v3.py
-*_v4.py
-2025_09_25_*.py
-new_html_template.py
-em_overlay_*.py
-export_meshes_*.py
-simple_mesh_*.py
-
-# Temporary files
-*.tmp
-*.log
-*.bak
-~$*
-*.txt
-
-# Debug and helper scripts (local dev only)
-_*.py
-check_*.py
-debug_*.py
-inspect_*.py
-verify_*.py
-analyze_overlap.py
-run_bips_update.py
-run_regen.py
-
-# Jupyter Notebooks checkpoints
-.ipynb_checkpoints/
-
-# Large output files
-*.html
-*.htm
-*.svg
-comprehensive_overlap_results/*.csv
-comprehensive_overlap_results/*.png
-
-# Documentation figures (small, intentionally tracked)
-!docs/
-!docs/figures/
-!docs/figures/*.png
-
-# Runtime / scratch
-pipeline_run.pid
+# ── Development-only (this repo) ──────────────────────────────────
 investigation_em/
-baseline_areas.csv
+
+# Run logs from detached pipeline jobs
+*.log
+rebuild_done.txt
+# Generated figure output
+publication_figures/
+*.svg
