@@ -9,7 +9,7 @@ type: software
 authors:
   - family-names: Serbe-Kamp
     given-names: Étienne
-    # orcid: "https://orcid.org/0000-0000-0000-0000"
+    orcid: "https://orcid.org/0000-0002-7097-6274"
 repository-code: "https://github.com/ETigerschuss/MESH"
 abstract: >-
   MESH detects physical appositions between neurons reconstructed in the FlyWire
@@ -46,6 +46,7 @@ preferred-citation:
       given-names: Georg
     - family-names: Serbe-Kamp
       given-names: Étienne
+      orcid: "https://orcid.org/0000-0002-7097-6274"
     - family-names: Kroell
       given-names: Lisa M.
     - family-names: Friedrich
