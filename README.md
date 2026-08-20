@@ -10,7 +10,7 @@ It is a general tool. You give it a list of segment IDs; it gives you their cont
 
 ### Came here from the paper?
 
-> **Paper:** Falt et al., *Vectorial efference copy and visuomotor transformation
+> **Paper:** Falt, Ammer et al., *Vectorial efference copy and visuomotor transformation
 > through gap junctions* — [bioRxiv](https://www.biorxiv.org/content/10.64898/2026.08.11.744090v1) ·
 > [doi:10.64898/2026.08.11.744090](https://doi.org/10.64898/2026.08.11.744090)
 
