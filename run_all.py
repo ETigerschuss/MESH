@@ -17,6 +17,7 @@ import sys
 import subprocess
 import time
 import json
+import argparse
 from datetime import datetime
 
 # Ensure UTF-8 output even when redirected to a file on Windows
@@ -24,7 +25,17 @@ if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 if sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+# Force UTF-8 in the child scripts too. When run_all's output is redirected to a
+# file/pipe, a child's stdout defaults to cp1252 on Windows and crashes on
+# Unicode like '→' (used in overlap pair keys) or 'µm²'. PYTHONUTF8 is read at
+# each child interpreter's startup, so set it before launching subprocesses.
+os.environ['PYTHONUTF8'] = '1'
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+
 from pathlib import Path
+
+from mesh_config import CONFIG_ENV_VAR, config_is_default, load_config, resolve_config_path
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -50,10 +61,16 @@ def _ensure_flywire_token():
 
 SCRIPTS = [
     ("overlap_analysis.py",        "Overlap analysis + 3D figures"),
+    ("validate_overlaps.py",       "Seg-adjacency validation (confined areas + real-contact patches)"),
+    ("reduced_matrix.py",          "Reduced MOT/MOS x HS/VS overlap matrix"),
     ("generate_skeleton_plots.py", "Skeleton plots"),
     ("generate_em_stacks.py",      "EM stack montages (contacts + synapses + overlaps)"),
+    ("generate_gj_figures.py",     "Putative gap-junction composite figures (MOT/MOS x partners)"),
     ("skeleton_em_viewer.py",      "Final comprehensive EM viewer (runs last)"),
 ]
+# NOTE: generate_gj_figures_extended.py is a manual, per-coordinate tool
+# (usage: python generate_gj_figures_extended.py <vx> <vy> <vz>), so it is not
+# part of the batch pipeline.
 
 
 def _find_latest_results():
@@ -82,9 +99,7 @@ def _can_skip_overlap_analysis():
     if not os.path.isdir(meshes) or len(os.listdir(meshes)) == 0:
         return False, "missing neuron meshes"
     # Count neurons in config
-    nf = os.path.join(SCRIPT_DIR, 'neurons.json')
-    with open(nf) as f:
-        cfg = json.load(f)
+    cfg, _ = load_config()
     expected = len(cfg.get('viewer_neurons', cfg.get('neurons', {})))
     n_meshes = len([f for f in os.listdir(meshes) if f.endswith('.obj')])
     if n_meshes < expected:
@@ -103,11 +118,44 @@ def _can_skip_skeleton_plots():
     return False, "missing skeleton plots"
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Run the full MESH pipeline.")
+    parser.add_argument(
+        "--config",
+        help="Path to a neuron config JSON file. Defaults to neurons.json or MESH_NEURON_CONFIG.",
+    )
+    parser.add_argument(
+        "--results-dir",
+        help="Optional results directory to export via MESH_RESULTS_DIR for all child scripts.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Disable cached-step skipping for this run.",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = _parse_args()
+    config_path = resolve_config_path(args.config)
+    if not config_path.is_file():
+        print(f"ERROR: config file not found: {config_path}")
+        sys.exit(1)
+
+    os.environ[CONFIG_ENV_VAR] = str(config_path)
+    if args.results_dir:
+        os.environ["MESH_RESULTS_DIR"] = args.results_dir
+
     start_all = time.time()
     print("=" * 72)
     print("  MESH Pipeline — Run All Scripts")
     print(f"  Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Config: {config_path.name}")
+    if not config_is_default(config_path):
+        print(f"  Config path: {config_path}")
+    if os.environ.get("MESH_RESULTS_DIR"):
+        print(f"  Results dir override: {os.environ['MESH_RESULTS_DIR']}")
     print("=" * 72)
 
     _ensure_flywire_token()
@@ -122,7 +170,7 @@ def main():
 
         # Smart skip: avoid re-running expensive steps if outputs exist
         skip = False
-        if script == "overlap_analysis.py":
+        if not args.force and script == "overlap_analysis.py":
             can_skip, info = _can_skip_overlap_analysis()
             if can_skip:
                 print(f"\n[{i}/{len(SCRIPTS)}] SKIP {script} — outputs already exist in {os.path.basename(info)}")
@@ -130,7 +178,7 @@ def main():
                 print(f"         Delete the results dir to force re-run.")
                 results.append((script, "SKIP (cached)"))
                 skip = True
-        elif script == "generate_skeleton_plots.py":
+        elif not args.force and script == "generate_skeleton_plots.py":
             can_skip, info = _can_skip_skeleton_plots()
             if can_skip:
                 print(f"\n[{i}/{len(SCRIPTS)}] SKIP {script} — skeleton plots already exist")

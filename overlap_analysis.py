@@ -67,6 +67,8 @@ import pickle
 import hashlib
 import traceback
 
+from mesh_config import load_config
+
 # Set Flywire Token (non-interactive-safe)
 # Try env var first, then fall back to saved cave-secret.json
 token = os.environ.get('FLYWIRE_TOKEN')
@@ -81,10 +83,8 @@ if not token:
 
 fafbseg.flywire.set_chunkedgraph_secret(token, overwrite=True)
 
-# Load neuron config from central neurons.json
-import json as _json
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json'), 'r') as _nf:
-    _cfg = _json.load(_nf)
+# Load neuron config from the active profile.
+_cfg, _CONFIG_PATH = load_config()
 neuron_ids = {int(info['id']): name for name, info in _cfg['neurons'].items()}
 N_TOP_PATCHES = _cfg.get('top_patches', 10)
 
@@ -632,8 +632,6 @@ def _get_group(name: str) -> str:
         return "VS"
     if name.startswith("HS"):
         return "HS"
-    if name.startswith("BIPS"):
-        return "BIPS"
     return "OTHER"
 
 def _hemi_of(name: str) -> str | None:
@@ -673,8 +671,31 @@ def _build_overlay_toggle_js(syn_idx: list[int], mid_idx: list[int], cen_idx: li
 
 
 def _build_color_map(valid_names):
+    """Color map for neuron meshes and overlap patches.
+
+    Publication behavior: prefer each neuron's explicit ``color_hex`` from the
+    active config (so the VS1-4 vs VS5-8 control split and all group colors come
+    straight from the config, e.g. publication_neurons.json). Any name without an
+    explicit config color falls back to the computed group shades below, which
+    keeps older configs working unchanged.
+    """
+    cfg_neurons = _cfg.get('neurons', {})
+    color_map = {}
+    missing = []
+    for name in valid_names:
+        info = cfg_neurons.get(name)
+        if info and info.get('color_hex'):
+            color_map[name] = info['color_hex']
+        else:
+            missing.append(name)
+    if missing:
+        color_map.update(_computed_group_shades(missing))
+    return color_map
+
+
+def _computed_group_shades(valid_names):
     """Assign group-based colors (L/R share the same hue):
-    MOS: #4D9221, VS: #D14900, MOT: #5E3C99, HS: #C51B7D, BIPS: black.
+    MOS: #4D9221, VS: #D14900, MOT: #5E3C99, HS: #C51B7D.
     HS shades split across HSN/HSE/HSS; VS shades across VS1-4; others share their base.
     """
 
@@ -683,13 +704,12 @@ def _build_color_map(valid_names):
         'MOS': '#4D9221',
         'HS':  '#C51B7D',
         'VS':  '#D14900',
-        'BIPS': '#000000',
     }
 
     def base_id(name: str) -> str:
         return name.split('_')[0]
 
-    ids_by_group: dict[str, set[str]] = {'MOT': set(), 'MOS': set(), 'HS': set(), 'VS': set(), 'BIPS': set()}
+    ids_by_group: dict[str, set[str]] = {'MOT': set(), 'MOS': set(), 'HS': set(), 'VS': set()}
     for n in (base_id(x) for x in valid_names):
         grp = _get_group(n)
         if grp in ids_by_group:
@@ -715,7 +735,6 @@ def _build_color_map(valid_names):
     mos_shades = make_shades(BASES['MOS'], sorted(ids_by_group['MOS']))
     hs_shades = make_shades(BASES['HS'], sorted(ids_by_group['HS']))
     vs_shades = make_shades(BASES['VS'], sorted(ids_by_group['VS']))
-    bips_shades = {lab: BASES['BIPS'] for lab in ids_by_group['BIPS']}
 
     color_map = {}
     for name in valid_names:
@@ -728,8 +747,6 @@ def _build_color_map(valid_names):
             color_map[name] = hs_shades[base]
         elif base in vs_shades:
             color_map[name] = vs_shades[base]
-        elif base in bips_shades:
-            color_map[name] = bips_shades[base]
         else:
             color_map[name] = '#888888'
     return color_map
@@ -1800,21 +1817,24 @@ def calculate_large_mesh_overlap(neuronA, neuronB, threshold=100.0):
                 print("  No overlap (bounding box)")
                 return 0.0, create_empty_geometric_data()
         
+        # Seeded RNG so the sampled-area estimate is reproducible run-to-run.
+        rng = np.random.default_rng(0)
+
         # Sample vertices to reduce memory usage
         max_vertices_A = min(50000, len(meshA.vertices))
         max_vertices_B = min(100000, len(meshB.vertices))
-        
+
         # Sample vertices from mesh A
         if len(meshA.vertices) > max_vertices_A:
-            indices_A = np.random.choice(len(meshA.vertices), max_vertices_A, replace=False)
+            indices_A = rng.choice(len(meshA.vertices), max_vertices_A, replace=False)
             sampled_vertices_A = meshA.vertices[indices_A]
         else:
             indices_A = np.arange(len(meshA.vertices))
             sampled_vertices_A = meshA.vertices
-        
+
         # Create KDTree for mesh B (potentially sampled)
         if len(meshB.vertices) > max_vertices_B:
-            indices_B = np.random.choice(len(meshB.vertices), max_vertices_B, replace=False)
+            indices_B = rng.choice(len(meshB.vertices), max_vertices_B, replace=False)
             tree_vertices_B = meshB.vertices[indices_B]
         else:
             indices_B = np.arange(len(meshB.vertices))
@@ -1835,15 +1855,15 @@ def calculate_large_mesh_overlap(neuronA, neuronB, threshold=100.0):
         close_vertices_A = indices_A[close_vertices_A_local]
         close_vertices_B = indices_B[tree_indices[close_mask]]
         
-        # Find faces containing close vertices (limited sampling)
-        close_faces = set()
+        # Find faces containing close vertices (limited sampling). Vectorised
+        # membership test (boolean vertex mask) instead of `v in array` scans.
         max_faces_to_check = min(50000, len(meshA.faces))
-        face_indices_to_check = np.random.choice(len(meshA.faces), max_faces_to_check, replace=False)
-        
-        for face_idx in face_indices_to_check:
-            face = meshA.faces[face_idx]
-            if any(v in close_vertices_A for v in face):
-                close_faces.add(face_idx)
+        face_indices_to_check = rng.choice(len(meshA.faces), max_faces_to_check, replace=False)
+        close_vertex_mask = np.zeros(len(meshA.vertices), dtype=bool)
+        close_vertex_mask[close_vertices_A] = True
+        sel = face_indices_to_check[
+            close_vertex_mask[meshA.faces[face_indices_to_check]].any(axis=1)]
+        close_faces = set(sel.tolist())
         
         # Calculate area from sampled faces
         total_area = 0.0
@@ -1972,12 +1992,14 @@ def calculate_neuron_overlap_simple(neuronA, neuronB, threshold=100.0):
             print("  No close vertices")
             return 0.0, create_empty_geometric_data()
         
-        # Find faces containing close vertices
-        close_faces = set()
-        for face_idx, face in enumerate(meshA.faces):
-            if any(v in close_vertices for v in face):
-                close_faces.add(face_idx)
-        
+        # Find faces with at least one close vertex. Vectorised: build a boolean
+        # vertex mask and test all faces at once. (The previous `v in
+        # close_vertices` scanned the whole array per vertex per face — O(F·N).)
+        close_vertex_mask = np.zeros(len(meshA.vertices), dtype=bool)
+        close_vertex_mask[close_vertices] = True
+        face_has_close = close_vertex_mask[meshA.faces].any(axis=1)
+        close_faces = np.where(face_has_close)[0]
+
         # Calculate area and collect geometric data (limit face data to prevent memory issues)
         total_area = 0.0
         face_data = []
@@ -2144,11 +2166,8 @@ def save_individual_patch_data(source, target, contact_area, geo_data, threshold
         print(f"    Saved {len(patch_data)} patches to {filename}")
 
 def generate_target_pairs():
-    """Generate target pairs from neurons.json pairing_rules (no BIPS)"""
-    import json as _json2
-    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
-    with open(cfg_path, 'r') as _f2:
-        _cfg2 = _json2.load(_f2)
+    """Generate target pairs from the active config pairing_rules."""
+    _cfg2, _ = load_config()
 
     # Build name→group mapping
     name_to_group = {}
@@ -2434,8 +2453,6 @@ def create_advanced_interactive_viz(matrices, valid_names, thresholds_microns):
             neuron_types.setdefault('Visual', []).append(name)
         elif any(x in name for x in ['HS']):
             neuron_types.setdefault('Horizontal', []).append(name)
-        elif any(x in name for x in ['H2']):
-            neuron_types.setdefault('H2', []).append(name)
         elif any(x in name for x in ['MEME']):
             neuron_types.setdefault('MEME', []).append(name)
         else:
@@ -2504,6 +2521,9 @@ def create_advanced_interactive_viz(matrices, valid_names, thresholds_microns):
         yaxis_title='Source Neuron',
         width=900,
         height=800,
+        paper_bgcolor='white',
+        plot_bgcolor='white',
+        font=dict(color='#111111'),
         updatemenus=[
             dict(
                 buttons=threshold_buttons,

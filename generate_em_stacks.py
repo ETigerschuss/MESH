@@ -70,6 +70,7 @@ Uses neurons.json for neuron IDs and colors (no hardcoded lists).
 
 import os
 import json
+import re
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
@@ -78,6 +79,8 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import time
+
+from mesh_config import load_config as load_mesh_config
 
 try:
     from cloudvolume import CloudVolume
@@ -88,7 +91,13 @@ except ImportError:
 
 # ─── CloudVolume download with timeout + retry ──────────────────────
 
-_cv_pool = ThreadPoolExecutor(max_workers=1)
+# Number of concurrent CloudVolume requests. Downloads are network-bound, so
+# concurrency is the single biggest speedup for the per-slice snapshot fetch
+# (was serial at 1 worker → ~15 h for a full rebuild). Override with
+# MESH_EM_WORKERS; keep modest to stay friendly to the data hosts.
+EM_WORKERS = max(1, int(os.environ.get('MESH_EM_WORKERS', '6')))
+
+_cv_pool = ThreadPoolExecutor(max_workers=EM_WORKERS)
 
 DOWNLOAD_TIMEOUT = 60       # seconds per CloudVolume slice request
 MAX_RETRIES = 3             # retry on timeout/error
@@ -134,11 +143,8 @@ def cv_download(vol, x0, x1, y0, y1, z0, z1, label=""):
 # ─── Configuration ────────────────────────────────────────────────────
 
 def load_config():
-    """Load neuron IDs, names, colors from neurons.json."""
-    base = os.path.dirname(os.path.abspath(__file__))
-    nf = os.path.join(base, 'neurons.json')
-    with open(nf, 'r') as f:
-        cfg = json.load(f)
+    """Load neuron IDs, names, colors from the active config profile."""
+    cfg, _ = load_mesh_config()
 
     neuron_ids = {}   # flyid -> name
     neuron_colors = {}  # name -> (r, g, b)
@@ -158,6 +164,21 @@ def resolve_results_dir():
     if candidates:
         return os.path.join(base, sorted(candidates)[-1])
     return os.path.join(base, 'comprehensive_overlap_results')
+
+
+# FlyWire / Neuroglancer reference voxel size (nm). EM-snapshot filename
+# coordinate tags use these voxel units so the numbers match what you read in
+# Neuroglancer (e.g. a putative GJ pinpointed at voxel x,y,z @ 4x4x40 nm).
+COORD_VOXEL_NM = (4.0, 4.0, 40.0)
+
+
+def _coord_tag(center_nm):
+    """Compact voxel-coordinate suffix for filenames at 4x4x40 nm
+    (matches the coordinates shown in Neuroglancer)."""
+    vx = int(round(center_nm[0] / COORD_VOXEL_NM[0]))
+    vy = int(round(center_nm[1] / COORD_VOXEL_NM[1]))
+    vz = int(round(center_nm[2] / COORD_VOXEL_NM[2]))
+    return f"vx{vx}_vy{vy}_vz{vz}"
 
 
 # ─── EM Snapshot Creator ─────────────────────────────────────────────
@@ -206,8 +227,17 @@ def create_segmented_snapshot(em_vol, seg_vol, center_nm,
         overlay_sm = np.zeros((*seg_slice.shape, 3), dtype=np.uint8)
         alpha_sm   = np.zeros(seg_slice.shape, dtype=np.float32)
 
+        # If both cells share the same mesh colour (e.g. VS1<->VS2, HSN<->HSE, or
+        # L<->R of one type), recolour the TARGET to its complementary colour so
+        # the two cells stay distinguishable in the EM overlay. The source keeps
+        # its mesh colour; the target is shown inverted.
+        c_src = tuple(neuron_colors.get(source_name, (255, 255, 255)))
+        c_tgt = tuple(neuron_colors.get(target_name, (255, 255, 255)))
+        if source_id != target_id and c_src == c_tgt:
+            c_tgt = tuple(255 - v for v in c_tgt)
+        _pair_cols = {source_id: c_src, target_id: c_tgt}
         for nid, nname in [(source_id, source_name), (target_id, target_name)]:
-            colour = neuron_colors.get(nname, (255, 255, 255))
+            colour = _pair_cols[nid]
             mask = (seg_slice == nid)
             overlay_sm[mask] = colour
             alpha_sm[mask] = 0.5
@@ -244,6 +274,57 @@ def create_segmented_snapshot(em_vol, seg_vol, center_nm,
     except Exception as e:
         print(f"    [ERROR] snapshot: {e}")
         return None
+
+
+# ─── Per-slice worker (parallel overlap download) ────────────────────
+
+def _process_overlap_slice(task):
+    """Render+save the EM snapshot(s) for one overlap Z-slice.
+
+    Self-contained so it can run in a worker thread. Produces byte-identical
+    output to the former serial loop: the first slice of a cluster also gets a
+    ``_segmented`` centre image; every slice gets its ``z±NNN`` image. Existing
+    files are skipped. Returns (n_new, n_skip).
+    """
+    (entry, sd, em_vol, seg_vol, neuron_colors, em_snap_dir) = task
+    idx = entry['idx']
+    src_id, tgt_id = entry['source_id'], entry['target_id']
+    src_name, tgt_name = entry['source'], entry['target']
+    z_off = sd['z_offset']
+    center_nm = (sd['cx'], sd['cy'], z_off * 40)
+    n_new = n_skip = 0
+
+    # First slice of the cluster → the "centre" segmented image.
+    if z_off == entry['z_lo']:
+        coord = _coord_tag(center_nm)
+        opath_c = os.path.join(em_snap_dir, f"overlap_{idx}_{coord}_segmented.png")
+        if not os.path.exists(opath_c):
+            img = create_segmented_snapshot(em_vol, seg_vol, center_nm,
+                                            src_id, tgt_id, src_name, tgt_name,
+                                            neuron_colors, z_offset_slices=0,
+                                            size_pixels=512)
+            if img is not None:
+                img.save(opath_c, 'PNG')
+                n_new += 1
+        else:
+            n_skip += 1
+
+    # Per-slice Z-offset image (relative to cluster z_lo).
+    rel_z = z_off - entry['z_lo']
+    sign = '+' if rel_z >= 0 else '-'
+    coord = _coord_tag(center_nm)
+    opath = os.path.join(em_snap_dir, f"overlap_{idx}_{coord}_z{sign}{abs(rel_z):03d}.png")
+    if os.path.exists(opath):
+        return n_new, n_skip + 1
+
+    img = create_segmented_snapshot(em_vol, seg_vol, center_nm,
+                                    src_id, tgt_id, src_name, tgt_name,
+                                    neuron_colors, z_offset_slices=0,
+                                    size_pixels=512)
+    if img is not None:
+        img.save(opath, 'PNG')
+        n_new += 1
+    return n_new, n_skip
 
 
 # ─── Spatial Clustering for Overlap Faces ────────────────────────────
@@ -415,61 +496,48 @@ def main():
         overlap_new = 0
         overlap_skip = 0
 
-        for entry in tqdm(plan, desc="Overlap clusters"):
-            idx = entry['idx']
-            src_id = entry['source_id']
-            tgt_id = entry['target_id']
-            src_name = entry['source']
-            tgt_name = entry['target']
+        # Optional download filter (metadata stays complete either way). Set
+        # MESH_OVERLAP_FILTER=motor_lptc to (re)download only the GJ-relevant
+        # motor<->LPTC (MOT/MOS <-> HS/VS) clusters — the publication subset —
+        # and skip the dendritic LPTC<->LPTC bulk. The EM host (bossDB S3) caps
+        # throughput at ~1.3 crops/s, so this turns an ~11 h job into ~45 min.
+        _ov_filter = os.environ.get('MESH_OVERLAP_FILTER', '').lower()
 
-            if src_id is None or tgt_id is None:
-                print(f"  [WARN] No fly-ID for {src_name}/{tgt_name}, skipping")
+        def _download_this(entry):
+            if _ov_filter != 'motor_lptc':
+                return True
+            ns = (str(entry['source']), str(entry['target']))
+            return (any(n.startswith(('MOT', 'MOS')) for n in ns)
+                    and any(n.startswith(('HS', 'VS')) for n in ns))
+
+        # Flatten to one task per Z-slice, then download concurrently. Each task
+        # writes its own file(s), so parallelism is safe and output-identical to
+        # the former serial loop — just EM_WORKERS requests in flight at once.
+        slice_tasks = []
+        for entry in plan:
+            if entry['source_id'] is None or entry['target_id'] is None:
+                print(f"  [WARN] No fly-ID for {entry['source']}/{entry['target']}, skipping")
                 continue
-
-            for sd in entry['slice_detail']:
-                z_off = sd['z_offset']
-                center_nm = (sd['cx'], sd['cy'], z_off * 40)
-
-                # File naming
-                if z_off == entry['z_lo']:
-                    # treat the first slice as "center" (segmented)
-                    fname_center = f"overlap_{idx}_segmented.png"
-                    opath_c = os.path.join(em_snap_dir, fname_center)
-                    if not os.path.exists(opath_c):
-                        img = create_segmented_snapshot(
-                            em_vol, seg_vol, center_nm,
-                            src_id, tgt_id, src_name, tgt_name,
-                            neuron_colors, z_offset_slices=0,
-                            size_pixels=512)
-                        if img is not None:
-                            img.save(opath_c, 'PNG')
-                            overlap_new += 1
-                    else:
-                        overlap_skip += 1
-
-                # Z-offset file (relative to cluster z_lo)
-                rel_z = z_off - entry['z_lo']
-                sign = '+' if rel_z >= 0 else '-'
-                fname = f"overlap_{idx}_z{sign}{abs(rel_z):03d}.png"
-                opath = os.path.join(em_snap_dir, fname)
-
-                if os.path.exists(opath):
-                    overlap_skip += 1
-                    continue
-
-                img = create_segmented_snapshot(
-                    em_vol, seg_vol, center_nm,
-                    src_id, tgt_id, src_name, tgt_name,
-                    neuron_colors, z_offset_slices=0,
-                    size_pixels=512)
-                if img is not None:
-                    img.save(opath, 'PNG')
-                    overlap_new += 1
-
             overlap_ok += 1
+            if not _download_this(entry):
+                continue
+            for sd in entry['slice_detail']:
+                slice_tasks.append(
+                    (entry, sd, em_vol, seg_vol, neuron_colors, em_snap_dir))
+        if _ov_filter:
+            print(f"  [filter={_ov_filter}] downloading {len(slice_tasks)} slices "
+                  f"(metadata still covers all {len(plan)} clusters)")
+
+        with ThreadPoolExecutor(max_workers=EM_WORKERS) as pool:
+            for n_new, n_skip in tqdm(
+                    pool.map(_process_overlap_slice, slice_tasks),
+                    total=len(slice_tasks), desc="Overlap slices"):
+                overlap_new += n_new
+                overlap_skip += n_skip
 
         print(f"\n  [OK] Overlaps: {overlap_ok}/{len(plan)} clusters, "
-              f"{overlap_new} new + {overlap_skip} skipped")
+              f"{overlap_new} new + {overlap_skip} skipped "
+              f"({EM_WORKERS} workers)")
 
         # Write overlap_em_meta.json
         meta_path = os.path.join(results_dir, 'overlap_em_meta.json')
@@ -556,11 +624,12 @@ def main():
         c_new = c_skip = 0
         for patch in tqdm(all_patches, desc="Contacts"):
             pidx = patch['idx']
+            center_coord = _coord_tag(patch['center'])
             for z_off in range(-20, 21):
                 if z_off == 0:
-                    fname = f"contact_{pidx}_segmented.png"
+                    fname = f"contact_{pidx}_{center_coord}_segmented.png"
                 else:
-                    fname = f"contact_{pidx}_z{z_off:+04d}.png"
+                    fname = f"contact_{pidx}_{center_coord}_z{z_off:+04d}.png"
                 opath = os.path.join(em_snap_dir, fname)
                 if os.path.exists(opath):
                     c_skip += 1
@@ -612,11 +681,12 @@ def main():
             if sid is None or tid is None:
                 continue
             center_nm = (row['x'], row['y'], row['z'])
+            center_coord = _coord_tag(center_nm)
             for z_off in range(-20, 21):
                 if z_off == 0:
-                    fname = f"synapse_{orig_idx}_segmented.png"
+                    fname = f"synapse_{orig_idx}_{center_coord}_segmented.png"
                 else:
-                    fname = f"synapse_{orig_idx}_z{z_off:+04d}.png"
+                    fname = f"synapse_{orig_idx}_{center_coord}_z{z_off:+04d}.png"
                 opath = os.path.join(em_snap_dir, fname)
                 if os.path.exists(opath):
                     s_skip += 1

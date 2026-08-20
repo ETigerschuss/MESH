@@ -42,6 +42,8 @@ from matplotlib.collections import PolyCollection
 from matplotlib.patches import Patch
 from tqdm import tqdm
 
+from mesh_config import load_config
+
 # Paths - auto-detect latest results directory
 def _default_results_dir():
     base = os.path.dirname(os.path.abspath(__file__))
@@ -57,27 +59,21 @@ GEO_DATA_DIR = os.path.join(RESULTS_DIR, "geometric_data")
 MESH_DIR = os.path.join(RESULTS_DIR, "neuron_meshes")
 OUTPUT_DIR = os.path.join(RESULTS_DIR, "overlap_plots_skeleton")
 
-# Load neuron IDs from central config (neurons.json)
-_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neurons.json')
-with open(_cfg_path, 'r') as _nf:
-    _cfg = json.load(_nf)
+# Load neuron IDs from the active config profile.
+_cfg, _CONFIG_PATH = load_config()
 neuron_ids = {int(info['id']): name for name, info in _cfg['neurons'].items()}
+neuron_colors = {
+    name: info.get('color_hex', '#999999')
+    for name, info in _cfg['neurons'].items()
+}
 
-# Color map (MOS, VS, MOT, HS, BIPS)
+# Color map (MOS, VS, MOT, HS)
 def get_color(name):
-    if 'MOS' in name:
-        return '#4D9221'
-    if 'VS' in name:
-        return '#D14900'
-    if 'MOT' in name:
-        return '#5E3C99'
-    if 'HS' in name:
-        return '#C51B7D'
-    if 'BIPS' in name:
-        return '#000000'
-    return '#999999'
+    return neuron_colors.get(name, '#999999')
 
 def get_group(name):
+    if not isinstance(name, str):
+        return 'OTHER'
     if 'MOT' in name:
         return 'MOT'
     if 'MOS' in name:
@@ -86,8 +82,6 @@ def get_group(name):
         return 'VS'
     if 'HS' in name:
         return 'HS'
-    if 'BIPS' in name:
-        return 'BIPS'
     return 'OTHER'
 
 print("="*60)
@@ -154,8 +148,8 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
     # Apply hemisphere filter
     if hemi_filter:
         scenario_faces = scenario_faces[
-            scenario_faces['neuron_a'].str.endswith(f'_{hemi_filter}') &
-            scenario_faces['neuron_b'].str.endswith(f'_{hemi_filter}')
+            scenario_faces['neuron_a'].astype(str).str.endswith(f'_{hemi_filter}', na=False) &
+            scenario_faces['neuron_b'].astype(str).str.endswith(f'_{hemi_filter}', na=False)
         ]
     
     if len(scenario_faces) == 0:
@@ -180,10 +174,13 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
         neuron_faces = scenario_faces[scenario_faces['neuron_a'] == source_name]
         print(f"    Overlap faces: {len(neuron_faces)}")
         
-        # Extract overlap triangles - detect degenerate ones (all 3 vertices identical)
-        overlap_triangles = []
-        overlap_centroids = []  # fallback: scatter points for degenerate faces
+        # Extract overlap triangles, grouped by PARTNER neuron (neuron_b) so each
+        # overlap patch is drawn in its partner's color. Degenerate faces (all 3
+        # vertices identical) fall back to a centroid scatter point.
+        overlap_tris_by_target = {}    # target -> [[v1,v2,v3], ...]
+        overlap_cents_by_target = {}   # target -> [[cx,cy,cz], ...]
         for _, row in neuron_faces.iterrows():
+            tgt = row['neuron_b']
             v1 = [row['vertex1_x'], row['vertex1_y'], row['vertex1_z']]
             v2 = [row['vertex2_x'], row['vertex2_y'], row['vertex2_z']]
             v3 = [row['vertex3_x'], row['vertex3_y'], row['vertex3_z']]
@@ -193,9 +190,11 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
                 cx = row.get('centroid_x', v1[0])
                 cy = row.get('centroid_y', v1[1])
                 cz = row.get('centroid_z', v1[2])
-                overlap_centroids.append([cx, cy, cz])
+                overlap_cents_by_target.setdefault(tgt, []).append([cx, cy, cz])
             else:
-                overlap_triangles.append([v1, v2, v3])
+                overlap_tris_by_target.setdefault(tgt, []).append([v1, v2, v3])
+        n_tris = sum(len(v) for v in overlap_tris_by_target.values())
+        n_cents = sum(len(v) for v in overlap_cents_by_target.values())
         
         # Get neuron mesh
         neuron_mesh = neurons[source_name]
@@ -203,91 +202,102 @@ for scenario_name, source_groups, target_groups, hemi_filter in scenarios:
         # Get neuron ID for navis
         neuron_id = next((nid for nid, nname in neuron_ids.items() if nname == source_name), source_name)
         
-        # Convert to navis and downsample
-        print(f"    Converting to navis MeshNeuron...")
-        mesh_neuron = navis.MeshNeuron(neuron_mesh, id=neuron_id, name=source_name)
-        mesh_neuron_ds = navis.downsample_neuron(mesh_neuron, downsampling_factor=10)
+        try:
+            # Convert to navis and downsample
+            print(f"    Converting to navis MeshNeuron...")
+            mesh_neuron = navis.MeshNeuron(neuron_mesh, id=neuron_id, name=source_name)
+            mesh_neuron_ds = navis.downsample_neuron(mesh_neuron, downsampling_factor=10)
         
-        # Generate plots (frontal and horizontal views)
-        views = [
-            ('frontal', 0, 1, ('x', '-y')),
-            ('horizontal', 0, 2, ('x', '-z'))
-        ]
+            # Generate plots (frontal and horizontal views)
+            views = [
+                ('frontal', 0, 1, ('x', '-y')),
+                ('horizontal', 0, 2, ('x', '-z'))
+            ]
         
-        for view_name, x_idx, y_idx, navis_view in views:
-            print(f"    Generating {view_name} view...")
+            for view_name, x_idx, y_idx, navis_view in views:
+                print(f"    Generating {view_name} view...")
             
-            # Plot neuron with navis
-            fig, ax = navis.plot2d(
-                mesh_neuron_ds,
-                color=get_color(source_name),
-                alpha=0.3,
-                view=navis_view,
-                method='2d',
-                radius=True,
-                figsize=(12, 10)
-            )
-            
-            # Handle axis if returned as array
-            if isinstance(ax, np.ndarray):
-                ax = ax[0]
-            
-            # Project overlap triangles to 2D
-            overlap_triangles_2d = []
-            for triangle in overlap_triangles:
-                projected = [[v[x_idx], v[y_idx]] for v in triangle]
-                overlap_triangles_2d.append(projected)
-
-            # Project degenerate centroids to 2D
-            centroid_xs = [c[x_idx] for c in overlap_centroids]
-            centroid_ys = [c[y_idx] for c in overlap_centroids]
-
-            # Add overlap surfaces (real triangles)
-            if overlap_triangles_2d:
-                overlap_collection = PolyCollection(
-                    overlap_triangles_2d,
-                    alpha=1.0,
-                    facecolors='#FF0030',
-                    edgecolors='#CC0020',
-                    linewidths=0.3,
-                    zorder=100
+                # Plot neuron with navis
+                fig, ax = navis.plot2d(
+                    mesh_neuron_ds,
+                    color=get_color(source_name),
+                    alpha=0.55,
+                    view=navis_view,
+                    method='2d',
+                    radius=True,
+                    figsize=(12, 10)
                 )
-                ax.add_collection(overlap_collection)
+            
+                # Handle axis if returned as array
+                if isinstance(ax, np.ndarray):
+                    ax = ax[0]
+            
+                # Draw each PARTNER's overlap in its color, EXAGGERATED so it
+                # pops: a big translucent glow halo + a saturated body underneath,
+                # with the crisp filled patch on top. Dense overlaps bloom into
+                # bold colored blobs.
+                legend_targets = set()
+                for tgt, tris in overlap_tris_by_target.items():
+                    col = get_color(tgt)
+                    tris_2d = [[[v[x_idx], v[y_idx]] for v in tri] for tri in tris]
+                    gx = [(tri[0][x_idx] + tri[1][x_idx] + tri[2][x_idx]) / 3.0 for tri in tris]
+                    gy = [(tri[0][y_idx] + tri[1][y_idx] + tri[2][y_idx]) / 3.0 for tri in tris]
+                    ax.scatter(gx, gy, s=340, c=col, alpha=0.20, edgecolors='none', zorder=98)
+                    ax.scatter(gx, gy, s=120, c=col, alpha=0.50, edgecolors='none', zorder=99)
+                    ax.add_collection(PolyCollection(
+                        tris_2d, alpha=1.0, facecolors=col, edgecolors=col,
+                        linewidths=0.6, zorder=100))
+                    legend_targets.add(tgt)
+                for tgt, cents in overlap_cents_by_target.items():
+                    col = get_color(tgt)
+                    cx = [c[x_idx] for c in cents]; cy = [c[y_idx] for c in cents]
+                    ax.scatter(cx, cy, s=340, c=col, alpha=0.20, edgecolors='none', zorder=98)
+                    ax.scatter(cx, cy, s=120, c=col, alpha=0.50, edgecolors='none', zorder=99)
+                    ax.scatter(cx, cy, s=55, c=col, alpha=1.0, edgecolors='#333333',
+                               linewidths=0.5, zorder=101, marker='o')
+                    legend_targets.add(tgt)
+                # Legend: one swatch per partner color present (HS / VS1-4 / VS5-8)
+                _grp_label = {"VS": "VS1-4", "VS5_8": "VS5-8", "HS": "HS",
+                              "MOT": "MOT", "MOS": "MOS"}
+                _seen = {}  # color -> label
+                for tgt in legend_targets:
+                    grp = _cfg['neurons'].get(tgt, {}).get('group', '')
+                    _seen.setdefault(get_color(tgt), _grp_label.get(grp, grp or tgt))
+                if _seen:
+                    from matplotlib.patches import Patch as _Patch
+                    ax.legend(handles=[_Patch(facecolor=c, label=l) for c, l in _seen.items()],
+                              loc='upper right', fontsize=8, frameon=False,
+                              title='Overlap partner')
 
-            # Add overlap centroids as scatter points (degenerate/recycled faces)
-            if centroid_xs:
-                ax.scatter(centroid_xs, centroid_ys,
-                           c='#FF0030', s=30, alpha=1.0,
-                           edgecolors='#CC0020', linewidths=0.5,
-                           zorder=100, marker='o',
-                           )
-
-            overlap_label = f'{len(overlap_triangles)} faces + {len(overlap_centroids)} centroids'            # Calculate axis limits
-            neuron_coords_x = neuron_mesh.vertices[:, x_idx]
-            neuron_coords_y = neuron_mesh.vertices[:, y_idx]
+                overlap_label = f'{n_tris} faces + {n_cents} centroids'            # Calculate axis limits
+                neuron_coords_x = neuron_mesh.vertices[:, x_idx]
+                neuron_coords_y = neuron_mesh.vertices[:, y_idx]
             
-            x_min, x_max = neuron_coords_x.min(), neuron_coords_x.max()
-            y_min, y_max = neuron_coords_y.min(), neuron_coords_y.max()
+                x_min, x_max = neuron_coords_x.min(), neuron_coords_x.max()
+                y_min, y_max = neuron_coords_y.min(), neuron_coords_y.max()
             
-            x_padding = (x_max - x_min) * 0.05
-            y_padding = (y_max - y_min) * 0.05
+                x_padding = (x_max - x_min) * 0.05
+                y_padding = (y_max - y_min) * 0.05
             
-            ax.set_xlim(x_min - x_padding, x_max + x_padding)
-            ax.set_ylim(y_min - y_padding, y_max + y_padding)
-            ax.set_aspect('equal')
-            ax.set_xlabel('X (nm)' if x_idx == 0 else 'Y (nm)', fontsize=10)
-            ax.set_ylabel('Y (nm)' if y_idx == 1 else 'Z (nm)', fontsize=10)
-            ax.grid(False)
-            ax.set_facecolor('white')
+                ax.set_xlim(x_min - x_padding, x_max + x_padding)
+                ax.set_ylim(y_min - y_padding, y_max + y_padding)
+                ax.set_aspect('equal')
+                ax.set_xlabel('X (nm)' if x_idx == 0 else 'Y (nm)', fontsize=10)
+                ax.set_ylabel('Y (nm)' if y_idx == 1 else 'Z (nm)', fontsize=10)
+                ax.grid(False)
+                ax.set_facecolor('white')
             
-            plt.tight_layout()
+                plt.tight_layout()
             
-            # Save plot
-            output_file = os.path.join(OUTPUT_DIR, f"{source_name}_{view_name}_{scenario_name}_0.1um.png")
-            plt.savefig(output_file, bbox_inches='tight', dpi=300, facecolor='white')
-            plt.close()
+                # Save plot
+                output_file = os.path.join(OUTPUT_DIR, f"{source_name}_{view_name}_{scenario_name}_0.1um.png")
+                plt.savefig(output_file, bbox_inches='tight', dpi=300, facecolor='white')
+                plt.close()
             
-            print(f"      Saved: {output_file}")
+                print(f"      Saved: {output_file}")
+        except Exception as e:
+            print(f"    Error processing {source_name}: {e}")
+            continue
 
 print(f"\n{'='*60}")
 print(f"All plots saved to: {OUTPUT_DIR}")

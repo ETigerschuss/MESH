@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+title: "MESH: connectome-scale contact detection and EM proofreading for putative gap junctions"
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+# TODO before release: confirm the author list, add ORCIDs, and add co-authors
+# / the Fenk Lab affiliation as appropriate for the paper.
+authors:
+  - family-names: Serbe
+    given-names: Etienne
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/ETigerschuss/MESH"
+abstract: >-
+  MESH detects physical appositions between neurons reconstructed in the FlyWire
+  connectome of the FAFB electron-microscopy volume, and supports their manual
+  validation in EM. Contacts are found geometrically (k-d tree over mesh
+  vertices, 100 nm proximity), grouped into discrete sites, confined to genuine
+  membrane apposition by segmentation adjacency, and rendered as EM image stacks
+  in an interactive viewer where an expert can measure, accept or reject each
+  site. Because chemical synapses are annotated in FlyWire but gap junctions are
+  not, subtracting annotated chemical synapses from validated appositions yields
+  a ranked list of putative electrical-synapse sites.
+keywords:
+  - connectomics
+  - Drosophila
+  - FlyWire
+  - FAFB
+  - electron microscopy
+  - gap junctions
+  - electrical synapses
+license: MIT
+version: 1.0.0
+# doi: "10.5281/zenodo.XXXXXXX"   # fill in after the first Zenodo release
+date-released: 2026-08-13
