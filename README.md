@@ -52,20 +52,22 @@ A **pre-built viewer** is available under
 [Releases](https://github.com/ETigerschuss/MESH/releases/latest) — no Python, no FlyWire
 token, no pipeline run.
 
-1. Download `MESH-viewer-prebuilt.zip` (~0.7 GB)
+1. Download `MESH-viewer-prebuilt.zip` (0.58 GB)
 2. Unzip it, keeping `skeleton_em_viewer.html` and `em_snaps/` side by side
 3. Open `skeleton_em_viewer.html` in a browser
 
-It contains all 56 motor-neuron ↔ LPTC contact sites from the paper — 3,057 EM
-images, including the confirmed MOT_R ↔ HSN_R gap junction — with every viewer
-function live: Z-stack navigation, the measurement tool, gap-junction
-candidates, the matrices and export.
+It contains the 26 neurons of the paper and the **49 motor-neuron ↔ LPTC contact
+sites that survived validation against the segmentation** — 2,895 EM images,
+including the confirmed MOT_R ↔ HSN_R gap junction. Every site listed has EM
+behind it, so anything you click on opens.
 
-The file is ~260 MB, so give the browser a few seconds to finish loading before
-judging the layout.
+All viewer functions are live: Z-stack navigation, the measurement tool,
+gap-junction candidates, the matrices and export.
 
-To work on other neurons, or to regenerate the complete dataset (all 619 contact
-sites, ~40 GB of EM), run the pipeline as described below.
+Chemical synapses and the smaller contact patches are not bundled — their EM
+runs to about 28 GB. To generate those, to work on other neurons, or to
+regenerate the complete dataset (all 619 contact sites, ~40 GB of EM), run the
+pipeline as described below.
 
 ## What it does
 
