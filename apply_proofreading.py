@@ -3,7 +3,7 @@
 apply_proofreading.py — make viewer proofreading stick
 ======================================================
 The EM viewer lets you delete spurious overlaps while proofreading (Delete
-Slice / Delete All) and mark confirmed gap junctions, then exports them to
+Slice / Delete All) and mark gap-junction candidates, then exports them to
 ``viewer_annotations.json``. That file, on its own, changes nothing: rebuilding
 the viewer brings the deleted areas back. This script APPLIES those decisions to
 the dataset so the removal is permanent and every downstream product (viewer,
@@ -16,7 +16,7 @@ For each exported decision it:
   * overlap_slice — removes that single Z-slice from the cluster's slice list
                     (and deletes the matching image), so the viewer skips it.
   * contact       — logged (contacts are not gap-junction candidates).
-  * gapJunction   — appended to ``confirmed_gj.csv``.
+  * gapJunction   — appended to ``gj_sites_marked.csv``.
 
 Originals are backed up (``*.bak_<timestamp>``) before anything is changed.
 After running, rebuild the viewer (``python skeleton_em_viewer.py``) and, if you
@@ -170,7 +170,7 @@ def main():
     deleted = ann.get("deletedItems", [])
     gjs = ann.get("gapJunctions", [])
     print(f"Results dir : {os.path.basename(rd)}")
-    print(f"Decisions   : {len(deleted)} deletions, {len(gjs)} confirmed gap junctions")
+    print(f"Decisions   : {len(deleted)} deletions, {len(gjs)} marked gap-junction candidates")
 
     del_clusters = {int(d["idx"]) for d in deleted if d.get("kind") == "overlap_all"}
     del_slices = {}
@@ -372,9 +372,9 @@ def main():
                 w.writerow([pair, f"{b:.6f}", f"{a:.6f}", f"{a-b:.6f}", stamp])
         print(f"Wrote proofread_areas.csv ({len(changed)} pair(s) changed)")
 
-    # confirmed gap junctions
+    # gap-junction candidates marked while proofreading
     if gjs:
-        conf_path = os.path.join(rd, "confirmed_gj.csv")
+        conf_path = os.path.join(rd, "gj_sites_marked.csv")
         exists = os.path.exists(conf_path)
         with open(conf_path, "a", newline="") as fh:
             w = csv.writer(fh)
@@ -386,13 +386,13 @@ def main():
                 w.writerow([g.get("source", ""), g.get("target", ""), x, y, z,
                             int(round(x / 4)), int(round(y / 4)), int(round(z / 40)),
                             g.get("kind", ""), g.get("idx", ""), g.get("timestamp", "")])
-        print(f"Appended {len(gjs)} confirmed gap junction(s) -> confirmed_gj.csv")
+        print(f"Appended {len(gjs)} marked candidate(s) -> gj_sites_marked.csv")
 
     # log
     with open(os.path.join(rd, "proofreading_applied.log"), "a", encoding="utf-8") as fh:
         fh.write(f"[{stamp}] {os.path.basename(ann_path)}: "
                  f"-{len(del_clusters)} clusters, -{len(to_delete)} images, "
-                 f"-{removed_cand} candidates, +{len(gjs)} confirmed GJ\n")
+                 f"-{removed_cand} candidates, +{len(gjs)} marked GJ candidates\n")
 
     print(f"\nApplied. Backups: *.bak_{stamp}")
     print("Next: rebuild the viewer  ->  python skeleton_em_viewer.py")

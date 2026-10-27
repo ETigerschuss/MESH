@@ -55,8 +55,8 @@ DENSITY_BIN_NM = 1200
 INSET_HALF_PX = 150         # EM inset half-size in 8 nm px (~2.4 um field)
 SKELETON_ALPHA = 0.55       # higher -> neuron more visible
 
-# Confirmed gap junctions to force-include (motor, partner-type) -> nm centroid.
-CONFIRMED_SITES = {
+# Best-characterised candidate sites to force-include (motor, partner-type) -> nm centroid.
+KEY_SITES = {
     ("MOT_R", "HSN"): [618792, 267816, 202720],   # voxel 154698,66954,5068 @4x4x40
 }
 
@@ -119,21 +119,21 @@ def _curate(motor, partners, pat, syn, grp):
     pool = []
     for p in partners:
         pool.extend(_pair_sites(pat, syn, motor, p, MAX_PER_PARTNER))
-    # force-include confirmed sites for this motor
+    # force-include the key sites for this motor
     forced = []
-    for (mm, ptype), nm in CONFIRMED_SITES.items():
+    for (mm, ptype), nm in KEY_SITES.items():
         if mm == motor:
             full = next((p for p in partners if p.split("_")[0] == ptype), None)
             if full:
                 forced.append({"partner": full, "center": np.array(nm, float),
-                               "area": 999.0, "syn": float("inf"), "confirmed": True})
+                               "area": 999.0, "syn": float("inf"), "key_site": True})
     pool = forced + sorted(pool, key=lambda s: -s["area"])
     # spatial dedupe + per-partner cap
     kept, per = [], {}
     for s in pool:
         if any(np.linalg.norm(s["center"] - k2["center"]) < DEDUPE_NM for k2 in kept):
             continue
-        if per.get(s["partner"], 0) >= MAX_PER_PARTNER and not s.get("confirmed"):
+        if per.get(s["partner"], 0) >= MAX_PER_PARTNER and not s.get("key_site"):
             continue
         kept.append(s)
         per[s["partner"]] = per.get(s["partner"], 0) + 1
@@ -235,7 +235,7 @@ def _build(motor, sides, imgs, mesh_obj, chex, blob_df, syn, out_base, show_syna
     for side, slots in coords.items():
         for s, (x, y, edge) in zip(sides[side], slots):
             ax = fig.add_axes([x, y, iw, ih]); ax.imshow(imgs[id(s)]); ax.axis("off")
-            ax.set_title(s["partner"].split("_")[0] + (" ★" if s.get("confirmed") else ""),
+            ax.set_title(s["partner"].split("_")[0] + (" ★" if s.get("key_site") else ""),
                          fontsize=14, fontweight="bold", color=chex[s["partner"]])
             cen = s["center"]
             axS.scatter([cen[0]], [cen[1]], s=300, facecolors="none",
@@ -248,17 +248,17 @@ def _build(motor, sides, imgs, mesh_obj, chex, blob_df, syn, out_base, show_syna
 
 
 def _canonical_sites(motor, partners, pat, syn):
-    """Best synapse-free site for each canonical partner (confirmed preferred)."""
+    """Best synapse-free site for each canonical partner (key site preferred)."""
     side = motor.split("_")[1]
     out = []
     for ptype in CANONICAL[motor[:3]]:
         cell = ptype + "_" + side
         if cell not in partners:
             continue
-        conf = CONFIRMED_SITES.get((motor, ptype))
+        conf = KEY_SITES.get((motor, ptype))
         if conf is not None:
             out.append({"partner": cell, "center": np.array(conf, float),
-                        "area": 999.0, "confirmed": True})
+                        "area": 999.0, "key_site": True})
             continue
         found = _pair_sites(pat, syn, motor, cell, 1)
         if found:
@@ -299,7 +299,7 @@ def _build_simple(motor, sites, imgs, mesh_obj, chex, blob_df, syn, out_base, sh
     ys = [0.69, 0.40, 0.11]
     for k, s in enumerate(sites):
         ax = fig.add_axes([0.66, ys[k], 0.30, 0.26]); ax.imshow(imgs[id(s)]); ax.axis("off")
-        ax.set_title(s["partner"].split("_")[0] + (" ★" if s.get("confirmed") else ""),
+        ax.set_title(s["partner"].split("_")[0] + (" ★" if s.get("key_site") else ""),
                      fontsize=15, fontweight="bold", color=chex[s["partner"]])
         cen = s["center"]
         axS.scatter([cen[0]], [cen[1]], s=320, facecolors="none",
@@ -352,7 +352,7 @@ def main():
                 "partner": s["partner"], "center_nm": s["center"].astype(int).tolist(),
                 "voxel_4x4x40": [int(round(s["center"][0]/4)), int(round(s["center"][1]/4)), int(round(s["center"][2]/40))],
                 "contact_area_um2": round(s["area"], 2),
-                "confirmed": bool(s.get("confirmed", False))}
+                "key_site": bool(s.get("key_site", False))}
         sides = _assign_sides(sites, cx, cy)
         blob = pat[(pat.neuron_a == motor) | (pat.neuron_b == motor)].copy()
         blob["partner"] = [b if a == motor else a for a, b in zip(blob.neuron_a, blob.neuron_b)]
