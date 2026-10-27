@@ -39,7 +39,7 @@ token, no pipeline run.
 
 It holds the 26 neurons of the paper and the **49 motor-neuron ↔ LPTC contact sites
 that survived validation against the segmentation** — 2,895 EM images, including the
-confirmed MOT_R ↔ HSN_R gap junction. Every site listed has EM behind it, so anything
+best-characterised gap-junction candidate (MOT_R ↔ HSN_R). Every site listed has EM behind it, so anything
 you click opens, and each contact opens on the slice carrying the most apposition.
 All viewer functions work: Z-stack navigation, the measurement tool, gap-junction
 candidates, the matrices and export.
@@ -47,6 +47,51 @@ candidates, the matrices and export.
 Chemical synapses and the smaller contact patches are not bundled — their EM runs to
 about 28 GB. Generate those, work on other neurons, or rebuild the complete dataset
 (all 619 contact sites, ~40 GB) by running the pipeline below.
+
+## Reproducing the figures in the paper
+
+Every panel generated from the connectome comes from one of the scripts below.
+Running the pipeline end to end reproduces them from the FlyWire data; a CAVE
+token is the only thing you need to supply.
+
+```bash
+pip install -r requirements.txt
+python run_all.py --config configs/publication_neurons.json
+```
+
+| Paper panel | Script | Output |
+|---|---|---|
+| Motor neuron with its contact sites and EM insets (Fig. 3i, 3j) | `generate_gj_figures.py` | `gj_figures/FIGURE_<motor>_3examples.pdf` and `_extended.pdf` |
+| Which motor neurons contact which LPTC types | `reduced_matrix.py` | `reduced_overlap_matrix.png` / `.svg` |
+| Contact sites painted on the neuron, before vs after EM proofreading | `figure_proofreading_comparison.py` | `gj_figures/FIGURE_<motor>_proofreading_comparison.pdf` |
+| 2-D projections per neuron pair | `generate_skeleton_plots.py` | `overlap_plots_skeleton/` |
+
+**The numbers behind them.** Contact areas are reported twice on purpose. The
+geometric area is mesh proximity; the confined area is what survives checking
+each site against the segmentation, and is the value the paper uses.
+
+| | Mesh proximity | Seg-validated |
+|---|---|---|
+| Total motor↔LPTC contact area | 389 µm² | **272 µm² (70%)** |
+| Strongest pair (MOT_R↔HSN_R) | 87.9 µm² | 69.6 µm² (79% real) |
+| Weakest pair (MOS_L↔HSS_L) | 1.8 µm² | **0 µm² — not a real contact** |
+
+`validate_overlaps.py` writes these to `overlap_validation.json` (per-pair real
+fraction and confined area) and `validated_patches.csv` (the apposed sites).
+
+**Where the judgement calls are.** Three parameters set what counts as a
+contact, all at the top of their scripts: the proximity threshold
+(`THRESHOLDS_MICRONS`, 0.1 µm), the distance at which contacts are treated as
+separate sites (`CLUSTER_THRESHOLD_NM`, 10 µm), and the segmentation adjacency
+tolerance (`DILATE_PX`, 3 voxels ≈ 48 nm). Changing any of them changes the
+areas, so they are stated here rather than buried.
+
+**On gap junctions.** None of this establishes a gap junction. An 8 nm/px
+section resolves close membrane apposition but not the pentalaminar profile of
+a junction. `phase_a_gj_candidates.py` subtracts the annotated chemical
+synapses (Buhmann et al. 2021, cleft score ≥ 50) from the validated contacts
+and ranks what remains in `gj_candidates.csv`; these are candidates. The site
+marked in the viewer is the best-characterised one, not a confirmed junction.
 
 ## What it does
 
@@ -56,7 +101,7 @@ about 28 GB. Generate those, work on other neurons, or rebuild the complete data
 | **Separate** | Groups contacts into anatomically distinct sites by Ward clustering (split at **10 µm**), so each apposition is inspected on its own. |
 | **Validate** | Re-checks each site against the segmentation (dilate one cell's mask, intersect with the partner) — mesh proximity over-reports contact by ~30%, and this removes it. |
 | **Look** | Cuts EM tiles (512 × 512 px at 8 nm/px = 4.1 µm) centred on each site, across ±20 sections, with both partners' segmentation overlaid. |
-| **Judge** | Opens an interactive 3-D + EM viewer: page through sites, measure appositions, delete false positives, mark confirmed gap junctions. |
+| **Judge** | Opens an interactive 3-D + EM viewer: page through sites, measure appositions, delete false positives, mark gap-junction candidates. |
 | **Persist** | `apply_proofreading.py` writes your deletions back into the dataset, so removed areas stay removed. |
 
 **Optional:** subtract annotated chemical synapses to leave only candidate *electrical* contacts (`phase_a_gj_candidates.py`).
@@ -437,7 +482,7 @@ Methodologically, the pseudopupil polar plots are built from the simulated MOS a
   - Auto-advances to next valid slice after deletion
 - **Delete All** — Eliminate an entire overlap cluster (all Z-slices at once)
   - Marks the cluster as eliminated in the area matrix
-  - Useful for confirmed false positives
+  - Useful for clear false positives
   - Made permanent by exporting and running `apply_proofreading.py` (see below)
 - Previous / Next navigation across all visible items
 - Download EM — Export current snapshot with coordinates in filename and metadata panel
@@ -457,7 +502,7 @@ decisions and apply them:
    The area matrix updates live as you go.
 3. Mark real gap junctions with **⚡ Putative Gap-Junc**.
 4. Click **💾 Export** → saves `viewer_annotations.json` (your deletions +
-   confirmed gap junctions).
+   gap-junction candidates you marked).
 5. Apply it to the dataset:
 
 ```bash
@@ -471,7 +516,7 @@ python apply_proofreading.py --dry-run       # ...without changing anything
    - deletes their `em_snaps/overlap_<idx>_*` images from disk
    - drops any gap-junction candidates inside a deleted area
    - prunes individual deleted Z-slices from their cluster
-   - appends confirmed sites to `confirmed_gj.csv`
+   - appends marked sites to `gj_sites_marked.csv`
    - logs every run to `proofreading_applied.log`
 
 6. Rebuild the viewer so it reflects the cleaned dataset:
@@ -512,7 +557,7 @@ comprehensive_overlap_results_YYYY-MM-DD/
 ├── overlap_validation.json       # Per-pair real fraction + confined area
 ├── validated_patches.csv         # Genuinely apposed contact sites
 ├── gj_candidates.csv             # Ranked gap-junction candidates
-├── confirmed_gj.csv              # Sites you confirmed while proofreading
+├── gj_sites_marked.csv          # Candidate sites you marked while proofreading
 ├── overlap_em_meta.json          # Contact cluster metadata
 ├── geometric_data/               # contact_faces.csv, contact_vertices.csv
 ├── em_snaps/                     # EM PNG snapshots (large)

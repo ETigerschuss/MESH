@@ -46,8 +46,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CHEM_MATCH_NM = 1000.0
 # Distinct candidate sites of one pair must be at least this far apart (nm).
 SITE_SEP_NM = 3000.0
-# Confirmed reference gap junction (MOT_R<->HSN_R), FlyWire voxel * (4,4,40).
-CONFIRMED_GJ_NM = np.array([154698 * 4, 66954 * 4, 5068 * 40], dtype=float)
+# Best-characterised gap-junction candidate (MOT_R<->HSN_R), FlyWire voxel * (4,4,40).
+# A gap junction cannot be established from an 8 nm/px section alone, so this is
+# the strongest candidate rather than a confirmed junction.
+STRONGEST_GJ_CANDIDATE_NM = np.array([154698 * 4, 66954 * 4, 5068 * 40], dtype=float)
 
 
 def _find_results_dir():
@@ -141,11 +143,11 @@ def main():
 
     # ── positive controls (adversarial sanity check) ───────────────────────
     print("\n" + "=" * 60 + "\nPOSITIVE CONTROLS\n" + "=" * 60)
-    # 1) the confirmed GJ must survive the filter (it is NOT a chemical synapse)
-    dd = np.sqrt(((app[["x", "y", "z"]].values - CONFIRMED_GJ_NM) ** 2).sum(1))
+    # 1) the strongest candidate must survive the filter (it is NOT a chemical synapse)
+    dd = np.sqrt(((app[["x", "y", "z"]].values - STRONGEST_GJ_CANDIDATE_NM) ** 2).sum(1))
     i = int(dd.argmin())
     row = app.iloc[i]
-    print(f"Confirmed MOT_R<->HSN_R GJ: nearest validated apposition {dd[i]:.0f} nm "
+    print(f"Strongest MOT_R<->HSN_R candidate: nearest validated apposition {dd[i]:.0f} nm "
           f"({row.pair}); classified = "
           f"{'CHEMICAL (FAIL)' if row.is_chemical else 'candidate (PASS)'}; "
           f"nearest chem synapse {row.nearest_chem_nm:.0f} nm")
